@@ -1,0 +1,39 @@
+# Java / Maven
+backend/target/
+*.class
+*.jar
+*.log
+
+# Node / Vite
+web-app/node_modules/
+web-app/dist/
+web-app/.vite/
+.pnpm-store/
+*.tsbuildinfo
+
+# Python
+engine/.venv/
+engine/__pycache__/
+engine/**/__pycache__/
+engine/.pytest_cache/
+*.pyc
+
+# Local build tools downloaded by developer setup
+.tools/
+
+# Local environment and secrets
+.env
+*.local
+application-local.yml
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime data
+data/
+.runtime/
+uploads/
+

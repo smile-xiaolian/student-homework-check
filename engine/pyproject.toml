@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edu-check-engine"
+version = "0.1.0"
+description = "Text and source-code originality checking worker"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+worker = ["psycopg[binary]>=3.2,<4", "boto3>=1.35,<2", "pypdf>=5,<6", "python-docx>=1.1,<2"]
+
+[project.scripts]
+edu-check-worker = "checker.worker:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["checker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,127 @@
+name: edu-submission
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-edu_submission}
+      POSTGRES_USER: ${POSTGRES_USER:-edu_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-postgres}
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./ops/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-edu_app} -d ${POSTGRES_DB:-edu_submission}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # MinIO 自 2025-10 起不再向 Docker Hub / Quay 发布免费社区镜像，
+  # 改用 Chainguard 的免费替代镜像（同一 MinIO 服务器二进制，无需登录）。
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-edu_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio-password}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      # 镜像为 distroless（无 shell/curl/mc），用 bash 内建 /dev/tcp 探测健康端点
+      test: ['CMD', 'bash', '-c', 'exec 3<>/dev/tcp/127.0.0.1/9000; printf "GET /minio/health/live HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3; read -r line <&3; case "$$line" in *" 200 "*) exit 0;; *) exit 1;; esac']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # 原 minio/mc 初始化镜像同样已下架，改用 engine 镜像（自带 boto3）创建存储桶
+  minio-init:
+    build:
+      context: ./engine
+      dockerfile: Dockerfile
+    command: ["python", "-m", "checker.init_bucket"]
+    environment:
+      STORAGE_ENDPOINT: http://minio:9000
+      STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-edu_minio}
+      STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change-me-minio-password}
+      STORAGE_BUCKET: ${MINIO_BUCKET:-edu-submission}
+      INIT_TIMEOUT_SECONDS: ${MINIO_INIT_TIMEOUT_SECONDS:-180}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  teaching-service:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-edu_submission}?stringtype=unspecified
+      DB_USERNAME: ${POSTGRES_USER:-edu_app}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-change-me-postgres}
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-random-secret-at-least-32-characters}
+      JWT_REFRESH_COOKIE_SECURE: ${JWT_REFRESH_COOKIE_SECURE:-false}
+      APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:5173,http://localhost:8088}
+      APP_DEMO_DATA: ${APP_DEMO_DATA:-true}
+      UPLOAD_MAX_FILE_SIZE: ${UPLOAD_MAX_FILE_SIZE:-100MB}
+      UPLOAD_MAX_REQUEST_SIZE: ${UPLOAD_MAX_REQUEST_SIZE:-110MB}
+      STORAGE_ENDPOINT: http://minio:9000
+      STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-edu_minio}
+      STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change-me-minio-password}
+      STORAGE_BUCKET: ${MINIO_BUCKET:-edu-submission}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/actuator/health/liveness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  check-worker:
+    build:
+      context: ./engine
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-edu_app}:${POSTGRES_PASSWORD:-change-me-postgres}@postgres:5432/${POSTGRES_DB:-edu_submission}
+      STORAGE_ENDPOINT: http://minio:9000
+      STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-edu_minio}
+      STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change-me-minio-password}
+      STORAGE_BUCKET: ${MINIO_BUCKET:-edu-submission}
+      CHECK_POLL_SECONDS: ${CHECK_POLL_SECONDS:-2}
+      CHECK_LEASE_SECONDS: ${CHECK_LEASE_SECONDS:-120}
+      LOG_LEVEL: ${CHECK_LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  web-app:
+    build:
+      context: ./web-app
+      dockerfile: Dockerfile
+    ports:
+      - "8088:80"
+    depends_on:
+      teaching-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:
+
