@@ -394,7 +394,17 @@ public class CheckingQueryService {
     }
 
     private OffsetDateTime toOffset(Object value) {
-        return value == null ? null : (OffsetDateTime) value;
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof OffsetDateTime offsetDateTime) {
+            return offsetDateTime;
+        }
+        // JdbcTemplate 查出的 timestamptz 列是 java.sql.Timestamp，不是 OffsetDateTime
+        if (value instanceof java.sql.Timestamp timestamp) {
+            return timestamp.toInstant().atOffset(ZoneOffset.UTC);
+        }
+        throw new IllegalArgumentException("Unsupported timestamp type: " + value.getClass().getName());
     }
 
     private record SubmissionRef(UUID submissionId, UUID assignmentId, UUID submitterId, UUID courseId) {
