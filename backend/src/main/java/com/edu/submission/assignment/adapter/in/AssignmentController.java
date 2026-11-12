@@ -14,6 +14,7 @@ import java.util.UUID;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -62,6 +63,13 @@ public class AssignmentController {
                                                  @RequestHeader(name = HttpHeaders.IF_MATCH, required = false) String ifMatch) {
         AssignmentView view = assignmentService.update(CurrentUser.require(), id, request, Etags.parse(ifMatch));
         return ResponseEntity.ok().header(HttpHeaders.ETAG, Etags.format(view.rowVersion())).body(view);
+    }
+
+    @DeleteMapping("/assignments/{id}")
+    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
+    public ResponseEntity<Void> delete(@PathVariable UUID id) {
+        assignmentService.delete(CurrentUser.require(), id);
+        return ResponseEntity.noContent().build();
     }
 
     @PostMapping("/assignments/{id}/publish")

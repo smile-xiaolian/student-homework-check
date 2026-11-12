@@ -16,6 +16,9 @@ export const assignmentApi = {
   publish(id: string) {
     return http.post<Assignment>(`/assignments/${id}/publish`).then((r) => r.data)
   },
+  remove(id: string) {
+    return http.delete(`/assignments/${id}`)
+  },
   checkConfig(id: string) {
     return http.get<Record<string, unknown>>(`/assignments/${id}/check-config`).then((r) => r.data)
   },

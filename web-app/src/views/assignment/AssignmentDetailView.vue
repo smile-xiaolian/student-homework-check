@@ -9,6 +9,7 @@ import { reviewApi } from '@/api/reviews'
 import { fileApi } from '@/api/files'
 import { errorMessage } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
+import AssignmentEditDialog from '@/components/AssignmentEditDialog.vue'
 import type { Assignment, Course, CourseMember, Review, Submission, SubmissionFile } from '@/types/api'
 
 const route = useRoute()
@@ -36,6 +37,8 @@ const savingReview = ref(false)
 const review = ref<Review | null>(null)
 const reviewForm = reactive({ rawScore: 0, checkVerdict: 'ORIGINAL', comment: '' })
 const showAllVersions = ref(false)
+const assignmentDialogVisible = ref(false)
+const editAssignment = ref<Assignment | null>(null)
 
 const canManage = computed(() => Boolean(course.value && (auth.hasRole('ADMIN') || course.value.ownerId === auth.user?.id)))
 const canInstruct = computed(() => canManage.value || members.value.some((item) =>
@@ -256,6 +259,30 @@ async function saveReview(submitAfter = false): Promise<void> {
   }
 }
 
+function openEdit(): void {
+  editAssignment.value = assignment.value
+  assignmentDialogVisible.value = true
+}
+
+async function onAssignmentSaved(): Promise<void> {
+  await load()
+}
+
+async function removeAssignment(): Promise<void> {
+  if (!assignment.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除作业「${assignment.value.title}」吗？删除后不可恢复。`,
+      '删除作业', { type: 'warning', confirmButtonText: '删除', confirmButtonClass: 'el-button--danger' },
+    )
+    await assignmentApi.remove(assignment.value.id)
+    ElMessage.success('作业已删除')
+    router.replace(`/courses/${course.value?.id ?? assignment.value.courseId}`)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -271,9 +298,15 @@ onMounted(load)
               <h1>{{ assignment.title }}</h1>
               <p>{{ course.courseCode }} · {{ course.name }}</p>
             </div>
-            <div class="deadline-card" :class="{ urgent: deadlinePassed && !lateWindowOpen }">
-              <small>截止时间</small><strong>{{ format(assignment.deadlineAt) }}</strong>
-              <span v-if="assignment.allowLate">补交至 {{ format(assignment.lateDeadlineAt) }}</span>
+            <div class="head-side">
+              <div v-if="canManage" class="head-actions">
+                <el-button size="small" @click="openEdit">编辑配置</el-button>
+                <el-button size="small" type="danger" plain @click="removeAssignment">删除作业</el-button>
+              </div>
+              <div class="deadline-card" :class="{ urgent: deadlinePassed && !lateWindowOpen }">
+                <small>截止时间</small><strong>{{ format(assignment.deadlineAt) }}</strong>
+                <span v-if="assignment.allowLate">补交至 {{ format(assignment.lateDeadlineAt) }}</span>
+              </div>
             </div>
           </div>
 
@@ -363,6 +396,8 @@ onMounted(load)
               </section>
             </aside>
           </div>
+
+          <AssignmentEditDialog v-model="assignmentDialogVisible" :course-id="course.id" :assignment="editAssignment" @saved="onAssignmentSaved" />
         </template>
       </template>
     </el-skeleton>
@@ -405,6 +440,8 @@ onMounted(load)
 .title-tags { display: flex; gap: 9px; align-items: center; margin-bottom: 13px; }
 .check-tag { background: #fff2d3; color: #9b660a; padding: 4px 7px; border-radius: 5px; font-size: 10px; }
 .weight { color: #7f8b98; font-size: 11px; }
+.head-side { display: flex; flex-direction: column; gap: 10px; align-items: flex-end; }
+.head-actions { display: flex; gap: 8px; }
 .deadline-card { min-width: 210px; background: #fff9ea; border: 1px solid #f0e2b8; border-radius: 14px; padding: 14px 17px; }
 .deadline-card small, .deadline-card strong, .deadline-card span { display: block; }
 .deadline-card small { color: #9d7d32; font-size: 10px; margin-bottom: 5px; }

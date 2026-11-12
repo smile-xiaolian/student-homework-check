@@ -175,6 +175,27 @@ public class AssignmentService {
     }
 
     @Transactional
+    public void delete(UserPrincipal principal, UUID assignmentId) {
+        Assignment assignment = requireAssignment(assignmentId);
+        Course course = courseService.requireCourse(assignment.getCourseId());
+        courseService.requireManage(course, principal);
+        assertCourseActive(course);
+        if (assignmentMapper.countSubmissions(assignmentId) > 0) {
+            throw ApiException.conflict("ASSIGNMENT_HAS_SUBMISSIONS", "作业已有提交，无法删除",
+                    "该作业已有学生提交，不能删除。如需停止提交，可关闭作业或归档课程。");
+        }
+        try {
+            assignmentMapper.deleteAttachments(assignmentId);
+            assignmentMapper.deleteById(assignmentId);
+        } catch (org.springframework.dao.DataIntegrityViolationException exception) {
+            throw ApiException.conflict("ASSIGNMENT_DELETE_BLOCKED", "作业无法删除",
+                    "该作业存在关联数据，无法删除，请刷新后重试。");
+        }
+        auditService.recordUser(principal.id(), "assignment.delete", "ASSIGNMENT", assignmentId,
+                "SUCCESS", Map.of("courseId", assignment.getCourseId().toString()), null);
+    }
+
+    @Transactional
     public AssignmentView publish(UserPrincipal principal, UUID assignmentId) {
         Assignment assignment = requireAssignment(assignmentId);
         Course course = courseService.requireCourse(assignment.getCourseId());

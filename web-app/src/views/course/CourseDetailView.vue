@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { courseApi } from '@/api/courses'
 import { assignmentApi } from '@/api/assignments'
 import { errorMessage } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
+import AssignmentEditDialog from '@/components/AssignmentEditDialog.vue'
 import type { Assignment, Course, CourseMember } from '@/types/api'
 
 const route = useRoute()
@@ -18,39 +19,9 @@ const members = ref<CourseMember[]>([])
 const assignments = ref<Assignment[]>([])
 const activeTab = ref('assignments')
 const assignmentVisible = ref(false)
+const editAssignment = ref<Assignment | null>(null)
 const memberVisible = ref(false)
-const assignmentRef = ref<FormInstance>()
 const memberForm = reactive({ userNo: '', memberRole: 'STUDENT' })
-const now = new Date()
-const localDeadline = new Date(now.getTime() + 7 * 86_400_000 - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
-const assignmentForm = reactive({
-  title: '', description: '', deadlineAt: localDeadline, allowLate: false,
-  lateDeadlineAt: '', weight: 0, checkEnabled: true, allowMultiVersion: true,
-  effectiveRule: 'LAST_SUBMISSION',
-})
-const rubricRows = ref([
-  { name: '内容完成度', maxScore: 50 },
-  { name: '质量与规范', maxScore: 30 },
-  { name: '思考与创新', maxScore: 20 },
-])
-const rubricTotal = computed(() => rubricRows.value.reduce((sum, row) => sum + (Number(row.maxScore) || 0), 0))
-const fileTypeOptions = ['pdf', 'docx', 'doc', 'txt', 'md', 'java', 'py', 'c', 'cpp', 'h', 'js', 'ts', 'go', 'zip']
-const restrictFileTypes = ref(false)
-const selectedFileTypes = ref<string[]>([...fileTypeOptions])
-const publishMode = ref<'manual' | 'scheduled'>('manual')
-const scheduledPublishAt = ref('')
-const assignmentRules: FormRules = {
-  title: [{ required: true, message: '请输入作业标题', trigger: 'blur' }],
-  deadlineAt: [{ required: true, message: '请选择截止时间', trigger: 'change' }],
-}
-
-function addRubricRow(): void {
-  rubricRows.value.push({ name: '', maxScore: 10 })
-}
-
-function removeRubricRow(index: number): void {
-  if (rubricRows.value.length > 1) rubricRows.value.splice(index, 1)
-}
 
 const canManage = computed(() => Boolean(course.value && (auth.hasRole('ADMIN') || course.value.ownerId === auth.user?.id)))
 const canInstruct = computed(() => canManage.value || members.value.some((item) =>
@@ -62,10 +33,6 @@ const teacherNames = computed(() => members.value.filter((item) => item.memberRo
 function format(value: string | null): string {
   if (!value) return '—'
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value))
-}
-
-function toIso(value: string): string | undefined {
-  return value ? new Date(value).toISOString() : undefined
 }
 
 async function load(): Promise<void> {
@@ -127,81 +94,31 @@ async function addMember(): Promise<void> {
   }
 }
 
-async function createAssignment(): Promise<void> {
-  if (!(await assignmentRef.value?.validate().catch(() => false))) return
-  if (assignmentForm.allowLate) {
-    if (!assignmentForm.lateDeadlineAt) {
-      ElMessage.warning('允许补交时必须选择补交截止时间')
-      return
-    }
-    if (new Date(assignmentForm.lateDeadlineAt) <= new Date(assignmentForm.deadlineAt)) {
-      ElMessage.warning('补交截止时间必须晚于正常截止时间')
-      return
-    }
-  }
-  if (rubricRows.value.some((row) => !row.name.trim())) {
-    ElMessage.warning('请为每个评分维度填写名称')
-    return
-  }
-  if (rubricRows.value.some((row) => !(Number(row.maxScore) > 0) || Number(row.maxScore) > 100)) {
-    ElMessage.warning('评分维度的满分必须为 1-100 之间的数字')
-    return
-  }
-  if (rubricTotal.value <= 0) {
-    ElMessage.warning('评分量规总分必须大于 0')
-    return
-  }
-  if (restrictFileTypes.value && !selectedFileTypes.value.length) {
-    ElMessage.warning('限制文件类型时至少选择一种类型')
-    return
-  }
-  if (publishMode.value === 'scheduled') {
-    if (!scheduledPublishAt.value) {
-      ElMessage.warning('请选择定时发布时间')
-      return
-    }
-    if (new Date(scheduledPublishAt.value) <= new Date()) {
-      ElMessage.warning('定时发布时间必须晚于当前时间')
-      return
-    }
-  }
+function openCreateAssignment(): void {
+  editAssignment.value = null
+  assignmentVisible.value = true
+}
+
+function openEditAssignment(item: Assignment): void {
+  editAssignment.value = item
+  assignmentVisible.value = true
+}
+
+async function onAssignmentSaved(): Promise<void> {
+  assignments.value = await courseApi.assignments(courseId)
+}
+
+async function removeAssignment(item: Assignment): Promise<void> {
   try {
-    const payload = {
-      title: assignmentForm.title,
-      description: assignmentForm.description,
-      deadlineAt: toIso(assignmentForm.deadlineAt),
-      allowLate: assignmentForm.allowLate,
-      lateDeadlineAt: assignmentForm.allowLate ? toIso(assignmentForm.lateDeadlineAt) : undefined,
-      weight: Number(assignmentForm.weight),
-      checkEnabled: assignmentForm.checkEnabled,
-      allowMultiVersion: assignmentForm.allowMultiVersion,
-      effectiveRule: assignmentForm.effectiveRule,
-      checkConfig: assignmentForm.checkEnabled ? {
-        mode: 'TEXT',
-        text_thresholds: { warning: 20, severe: 50 },
-        struct_thresholds: { warning: 30, severe: 60 },
-        libraries: ['CLASS'],
-        exclude: { references: true, template: true },
-      } : undefined,
-      rubricDefinition: {
-        totalScore: rubricTotal.value,
-        dimensions: rubricRows.value.map((row, index) => ({
-          key: `dim${index + 1}`,
-          name: row.name.trim(),
-          maxScore: Number(row.maxScore),
-        })),
-      },
-      allowedFileTypes: restrictFileTypes.value ? [...selectedFileTypes.value] : undefined,
-      scheduledPublishAt: publishMode.value === 'scheduled' ? toIso(scheduledPublishAt.value) : undefined,
-    }
-    await assignmentApi.create(courseId, payload)
-    ElMessage.success(publishMode.value === 'scheduled'
-      ? '作业草稿已创建，到达设定时间后将自动发布'
-      : '作业草稿已创建')
-    assignmentVisible.value = false
+    await ElMessageBox.confirm(
+      `确定删除作业「${item.title}」吗？删除后不可恢复。`,
+      '删除作业', { type: 'warning', confirmButtonText: '删除', confirmButtonClass: 'el-button--danger' },
+    )
+    await assignmentApi.remove(item.id)
+    ElMessage.success('作业已删除')
     assignments.value = await courseApi.assignments(courseId)
   } catch (error) {
-    ElMessage.error(errorMessage(error))
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
   }
 }
 
@@ -253,16 +170,20 @@ onMounted(load)
               <el-tab-pane label="作业" name="assignments">
                 <div class="tab-toolbar">
                   <p>按发布时间与截止时间管理作业。</p>
-                  <el-button v-if="canInstruct && course.status === 'ACTIVE'" type="primary" @click="assignmentVisible = true">＋ 新建作业</el-button>
+                  <el-button v-if="canInstruct && course.status === 'ACTIVE'" type="primary" @click="openCreateAssignment">＋ 新建作业</el-button>
                 </div>
                 <div v-if="assignments.length" class="assignment-table">
-                  <button v-for="item in assignments" :key="item.id" type="button" class="table-row" @click="router.push(`/assignments/${item.id}`)">
+                  <div v-for="item in assignments" :key="item.id" role="button" tabindex="0" class="table-row" @click="router.push(`/assignments/${item.id}`)">
                     <span class="status-dot" :class="item.status.toLowerCase()" />
                     <span class="row-main"><strong>{{ item.title }}</strong><small>截止 {{ format(item.deadlineAt) }} · 权重 {{ item.weight }}%</small></span>
                     <span class="row-tags"><el-tag size="small" effect="plain" :type="item.status === 'PUBLISHED' ? 'success' : 'info'">{{ item.status === 'PUBLISHED' ? '已发布' : '草稿' }}</el-tag><el-tag v-if="item.status === 'DRAFT' && item.scheduledPublishAt" size="small" effect="plain" type="warning">定时 {{ format(item.scheduledPublishAt) }}</el-tag><span v-if="item.checkEnabled" class="check-tag">查重</span></span>
-                    <el-button v-if="canInstruct && item.status === 'DRAFT'" size="small" plain @click.stop="publish(item)">发布</el-button>
+                    <div v-if="canInstruct" class="row-actions" @click.stop>
+                      <el-button v-if="item.status === 'DRAFT'" size="small" plain @click="publish(item)">发布</el-button>
+                      <el-button size="small" plain @click="openEditAssignment(item)">编辑</el-button>
+                      <el-button size="small" type="danger" plain @click="removeAssignment(item)">删除</el-button>
+                    </div>
                     <span class="arrow">→</span>
-                  </button>
+                  </div>
                 </div>
                 <div v-else class="empty-line">还没有作业。{{ canInstruct ? '创建第一份作业吧。' : '' }}</div>
               </el-tab-pane>
@@ -289,67 +210,7 @@ onMounted(load)
       </template>
     </el-skeleton>
 
-    <el-dialog v-model="assignmentVisible" title="新建作业" width="min(650px, 94vw)" destroy-on-close>
-      <el-form ref="assignmentRef" :model="assignmentForm" :rules="assignmentRules" label-position="top">
-        <el-form-item label="作业标题" prop="title"><el-input v-model="assignmentForm.title" placeholder="请输入作业标题" /></el-form-item>
-        <el-form-item label="作业要求"><el-input v-model="assignmentForm.description" type="textarea" :rows="4" placeholder="说明任务内容、提交格式与评分要求" /></el-form-item>
-        <div class="form-row">
-          <el-form-item label="截止时间" prop="deadlineAt"><el-date-picker v-model="assignmentForm.deadlineAt" type="datetime" value-format="YYYY-MM-DDTHH:mm" style="width: 100%" /></el-form-item>
-          <el-form-item label="课程权重（%）"><el-input-number v-model="assignmentForm.weight" :min="0" :max="100" style="width: 100%" /></el-form-item>
-        </div>
-        <el-form-item label="提交策略">
-          <div class="switch-grid">
-            <el-checkbox v-model="assignmentForm.allowMultiVersion">允许多版本提交</el-checkbox>
-            <el-checkbox v-model="assignmentForm.checkEnabled">启用自动查重</el-checkbox>
-            <el-checkbox v-model="assignmentForm.allowLate">允许补交</el-checkbox>
-          </div>
-        </el-form-item>
-        <el-form-item v-if="assignmentForm.allowLate" label="补交截止时间"><el-date-picker v-model="assignmentForm.lateDeadlineAt" type="datetime" value-format="YYYY-MM-DDTHH:mm" style="width: 100%" /></el-form-item>
-        <el-form-item label="评分量规">
-          <div class="rubric-editor">
-            <div v-for="(row, index) in rubricRows" :key="index" class="rubric-row">
-              <el-input v-model="row.name" placeholder="评分维度名称，如 内容完成度" />
-              <el-input-number v-model="row.maxScore" :min="1" :max="100" :precision="0" controls-position="right" />
-              <el-button link type="danger" :disabled="rubricRows.length <= 1" @click="removeRubricRow(index)">删除</el-button>
-            </div>
-            <div class="rubric-foot">
-              <el-button size="small" @click="addRubricRow">＋ 添加维度</el-button>
-              <span>合计 <b>{{ rubricTotal }}</b> 分</span>
-            </div>
-          </div>
-        </el-form-item>
-        <el-form-item label="提交文件类型">
-          <div class="file-type-editor">
-            <el-checkbox v-model="restrictFileTypes">限制本次作业可提交的文件类型</el-checkbox>
-            <template v-if="restrictFileTypes">
-              <el-checkbox-group v-model="selectedFileTypes" class="type-group">
-                <el-checkbox v-for="type in fileTypeOptions" :key="type" :value="type">{{ type }}</el-checkbox>
-              </el-checkbox-group>
-              <p class="type-hint">仅允许学生上传勾选的类型（仍受系统全局白名单约束）。</p>
-            </template>
-            <p v-else class="type-hint">不限制时沿用系统配置的允许类型（PDF、Word、文本与常见源码文件）。</p>
-          </div>
-        </el-form-item>
-        <el-form-item label="发布方式">
-          <div class="publish-mode">
-            <el-radio-group v-model="publishMode">
-              <el-radio value="manual">保存草稿，稍后手动发布</el-radio>
-              <el-radio value="scheduled">定时自动发布</el-radio>
-            </el-radio-group>
-            <el-date-picker
-              v-if="publishMode === 'scheduled'"
-              v-model="scheduledPublishAt"
-              type="datetime"
-              value-format="YYYY-MM-DDTHH:mm"
-              placeholder="选择发布时间"
-              style="width: 100%"
-            />
-            <p v-if="publishMode === 'scheduled'" class="type-hint">到达设定时间后系统将自动发布并通知课程学生。</p>
-          </div>
-        </el-form-item>
-      </el-form>
-      <template #footer><el-button @click="assignmentVisible = false">取消</el-button><el-button type="primary" @click="createAssignment">保存草稿</el-button></template>
-    </el-dialog>
+    <AssignmentEditDialog v-model="assignmentVisible" :course-id="courseId" :assignment="editAssignment" @saved="onAssignmentSaved" />
 
     <el-dialog v-model="memberVisible" title="添加课程成员" width="min(440px, 92vw)">
       <el-form label-position="top">
@@ -397,6 +258,7 @@ onMounted(load)
 .row-main strong { font-size: 13px; margin-bottom: 5px; }
 .row-main small { color: #8b96a3; font-size: 11px; }
 .row-tags { display: flex; gap: 6px; align-items: center; }
+.row-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 .check-tag { color: #a2660a; background: #fff4d9; padding: 4px 6px; border-radius: 5px; font-size: 10px; }
 .arrow { color: #97aaa6; font-size: 16px; margin-left: 4px; }
 .settings-list > div { display: flex; justify-content: space-between; gap: 20px; padding: 16px 3px; border-bottom: 1px solid #edf1f2; font-size: 13px; }
