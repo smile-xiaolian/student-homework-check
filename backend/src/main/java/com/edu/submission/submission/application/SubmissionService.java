@@ -202,11 +202,14 @@ public class SubmissionService {
     }
 
     @Transactional(readOnly = true)
-    public List<SubmissionView> listForAssignment(UserPrincipal principal, UUID assignmentId) {
+    public List<SubmissionView> listForAssignment(UserPrincipal principal, UUID assignmentId, boolean allVersions) {
         Assignment assignment = assignmentService.requireAssignment(assignmentId);
         Course course = courseService.requireCourse(assignment.getCourseId());
         courseService.requireManage(course, principal);
-        return submissionMapper.findByAssignment(assignmentId).stream()
+        List<Submission> submissions = allVersions
+                ? submissionMapper.findByAssignment(assignmentId)
+                : submissionMapper.findEffectiveByAssignment(assignmentId);
+        return submissions.stream()
                 .map(submission -> toView(submission, displayName(submission.getSubmitterId())))
                 .toList();
     }

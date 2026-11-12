@@ -78,9 +78,9 @@ public class FileUploadService {
             throw ApiException.unprocessable("FILE_TOO_LARGE", "文件超过大小限制",
                     "单个文件不能超过 " + (maxSize / 1024 / 1024) + " MB。");
         }
-        if (!allowedExtensions().contains(extension)) {
+        if (!effectiveAllowedExtensions(assignment).contains(extension)) {
             throw ApiException.unprocessable("FILE_TYPE_NOT_ALLOWED", "不支持该文件类型",
-                    "允许的扩展名：" + String.join(", ", allowedExtensions()) + "。");
+                    "该作业允许的扩展名：" + String.join(", ", effectiveAllowedExtensions(assignment)) + "。");
         }
         byte[] content;
         try {
@@ -163,6 +163,39 @@ public class FileUploadService {
         }
         return new DownloadedFile(file.originalName(), file.mimeType(),
                 storageService.get(file.objectKey()));
+    }
+
+    /** 生效的扩展名白名单：全局配置 ∩ 作业级限制（作业未配置限制时仅用全局配置）。 */
+    private List<String> effectiveAllowedExtensions(Assignment assignment) {
+        List<String> global = allowedExtensions();
+        List<String> restricted = assignmentAllowedExtensions(assignment);
+        if (restricted.isEmpty()) {
+            return global;
+        }
+        return global.stream().filter(restricted::contains).toList();
+    }
+
+    private List<String> assignmentAllowedExtensions(Assignment assignment) {
+        String raw = assignment.getAllowedFileTypes();
+        if (raw == null || raw.isBlank() || "[]".equals(raw)) {
+            return List.of();
+        }
+        try {
+            JsonNode node = objectMapper.readTree(raw);
+            if (!node.isArray()) {
+                return List.of();
+            }
+            List<String> values = new java.util.ArrayList<>();
+            for (JsonNode item : node) {
+                String value = item.asText("");
+                if (!value.isBlank()) {
+                    values.add(value.toLowerCase(Locale.ROOT));
+                }
+            }
+            return values;
+        } catch (Exception exception) {
+            return List.of();
+        }
     }
 
     private List<String> allowedExtensions() {

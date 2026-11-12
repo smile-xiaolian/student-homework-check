@@ -14,8 +14,10 @@ export const submissionApi = {
   mine(assignmentId: string) {
     return http.get<Submission[]>(`/assignments/${assignmentId}/submissions/mine`).then((r) => r.data)
   },
-  list(assignmentId: string) {
-    return http.get<Submission[]>(`/assignments/${assignmentId}/submissions`).then((r) => r.data)
+  list(assignmentId: string, allVersions = false) {
+    return http.get<Submission[]>(`/assignments/${assignmentId}/submissions`, {
+      params: allVersions ? { allVersions: true } : undefined,
+    }).then((r) => r.data)
   },
   get(id: string) {
     return http.get<Submission>(`/submissions/${id}`).then((r) => r.data)

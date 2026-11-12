@@ -35,6 +35,7 @@ const attachmentItems = ref<SubmissionFile[]>([])
 const savingReview = ref(false)
 const review = ref<Review | null>(null)
 const reviewForm = reactive({ rawScore: 0, checkVerdict: 'ORIGINAL', comment: '' })
+const showAllVersions = ref(false)
 
 const canManage = computed(() => Boolean(course.value && (auth.hasRole('ADMIN') || course.value.ownerId === auth.user?.id)))
 const canInstruct = computed(() => canManage.value || members.value.some((item) =>
@@ -49,6 +50,12 @@ const lateWindowOpen = computed(() => Boolean(assignment.value?.allowLate && ass
 const canSubmit = computed(() => Boolean(assignment.value?.status === 'PUBLISHED' && course.value?.status === 'ACTIVE'
   && (!deadlinePassed.value || lateWindowOpen.value)))
 const requiresFreshConsent = computed(() => !latestSubmission.value?.integrityConsent)
+const globalFileTypes = ['pdf', 'docx', 'doc', 'txt', 'md', 'java', 'py', 'c', 'cpp', 'h', 'js', 'ts', 'go']
+const allowedFileTypes = computed(() => {
+  const restricted = assignment.value?.allowedFileTypes ?? []
+  return restricted.length ? restricted.filter((type) => globalFileTypes.includes(type)) : globalFileTypes
+})
+const fileAccept = computed(() => allowedFileTypes.value.map((type) => `.${type}`).join(','))
 
 const reviewStats = computed(() => ({
   total: submissions.value.length,
@@ -101,7 +108,7 @@ async function load(): Promise<void> {
 
 async function loadSubmissions(): Promise<void> {
   if (isStudent.value) submissions.value = await submissionApi.mine(assignmentId)
-  else if (canReview.value) submissions.value = await submissionApi.list(assignmentId)
+  else if (canReview.value) submissions.value = await submissionApi.list(assignmentId, showAllVersions.value)
   else submissions.value = []
 }
 
@@ -118,7 +125,7 @@ async function onFilesSelected(event: Event): Promise<void> {
     ElMessage.warning('单次提交最多包含 10 个附件')
     return
   }
-  const allowed = new Set(['pdf', 'docx', 'doc', 'txt', 'md', 'java', 'py', 'c', 'cpp', 'h', 'js', 'ts', 'go'])
+  const allowed = new Set(allowedFileTypes.value)
   uploading.value = true
   try {
     for (const file of files) {
@@ -288,10 +295,10 @@ onMounted(load)
                 <template v-if="canSubmit">
                   <el-input v-model="onlineText" type="textarea" :rows="10" maxlength="1000000" show-word-limit placeholder="在此粘贴或输入作业正文……" />
                   <div class="file-uploader">
-                    <input ref="uploadInput" class="hidden-input" type="file" multiple accept=".pdf,.docx,.doc,.txt,.md,.java,.py,.c,.cpp,.h,.js,.ts,.go" @change="onFilesSelected" />
+                    <input ref="uploadInput" class="hidden-input" type="file" multiple :accept="fileAccept" @change="onFilesSelected" />
                     <div class="file-upload-head">
                       <el-button size="small" :loading="uploading" @click="chooseFiles">选择附件</el-button>
-                      <span>支持 PDF、Word、文本与常见源码文件，单个不超过 100MB，最多 10 个。</span>
+                      <span>{{ assignment.allowedFileTypes?.length ? `本次作业仅允许上传：${allowedFileTypes.join('、')}，` : '支持 PDF、Word、文本与常见源码文件，' }}单个不超过 100MB，最多 10 个。</span>
                     </div>
                     <el-progress v-if="uploading" :percentage="uploadPercent" :stroke-width="6" />
                     <div v-if="uploadedFiles.length" class="uploaded-list">
@@ -308,9 +315,15 @@ onMounted(load)
               </section>
 
               <section class="surface surface-pad history-panel">
-                <div class="section-title"><div><h2>{{ isStudent ? '我的提交历史' : '学生提交' }}</h2><p>{{ isStudent ? '查重完成后可查看报告并等待评审。' : '按提交时间展示全部学生与版本。' }}</p></div><el-button v-if="!isStudent" size="small" @click="loadSubmissions">刷新</el-button></div>
+                <div class="section-title">
+                  <div><h2>{{ isStudent ? '我的提交历史' : '学生提交' }}</h2><p>{{ isStudent ? '查重完成后可查看报告并等待评审。' : (showAllVersions ? '按提交时间展示全部学生与全部版本。' : '每位学生仅展示最新生效版本；如需切换生效版本，请打开“全部版本”。') }}</p></div>
+                  <div v-if="!isStudent" class="section-actions">
+                    <label class="all-versions-toggle"><el-switch v-model="showAllVersions" size="small" @change="loadSubmissions" /><span>全部版本</span></label>
+                    <el-button size="small" @click="loadSubmissions">刷新</el-button>
+                  </div>
+                </div>
                 <div v-if="!isStudent" class="review-metrics">
-                  <span><b>{{ reviewStats.total }}</b>总提交</span><span><b>{{ reviewStats.late }}</b>迟交</span><span><b>{{ reviewStats.completed }}</b>可评审</span><span><b>{{ reviewStats.failed }}</b>查重失败</span>
+                  <span><b>{{ reviewStats.total }}</b>{{ showAllVersions ? '总提交' : '已交学生' }}</span><span><b>{{ reviewStats.late }}</b>迟交</span><span><b>{{ reviewStats.completed }}</b>可评审</span><span><b>{{ reviewStats.failed }}</b>查重失败</span>
                 </div>
                 <el-table v-if="submissions.length" :data="submissions" style="width: 100%">
                   <el-table-column v-if="!isStudent" prop="submitterName" label="学生" min-width="105" />
@@ -412,6 +425,8 @@ onMounted(load)
 .section-title { display: flex; justify-content: space-between; gap: 12px; align-items: start; margin-bottom: 14px; }
 .section-title h2 { margin-bottom: 4px; }
 .section-title p { color: #8c97a3; font-size: 11px; margin: 0; }
+.section-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.all-versions-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; color: #74818e; white-space: nowrap; }
 .effective-tag { background: #e3f7f1; color: #17766c; border-radius: 7px; padding: 6px 9px; font-size: 10px; white-space: nowrap; }
 .hidden-input { display: none; }
 .file-uploader { margin-top: 12px; padding: 13px; border: 1px dashed #cfdadb; border-radius: 10px; background: #fbfdfd; }

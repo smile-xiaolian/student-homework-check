@@ -9,6 +9,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 
 public record AssignmentCreateRequest(
         @NotBlank(message = "请输入作业标题")
@@ -27,6 +28,8 @@ public record AssignmentCreateRequest(
         Boolean checkEnabled,
         JsonNode checkConfig,
         JsonNode rubricDefinition,
+        List<String> allowedFileTypes,
+        OffsetDateTime scheduledPublishAt,
         @DecimalMin(value = "0", message = "作业权重不能为负")
         @DecimalMax(value = "100", message = "作业权重不能超过 100")
         BigDecimal weight

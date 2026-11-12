@@ -26,6 +26,8 @@ public class Assignment {
     private Boolean checkEnabled;
     private String checkConfig;
     private String rubricDefinition;
+    private String allowedFileTypes;
+    private OffsetDateTime scheduledPublishAt;
     private BigDecimal weight;
     private UUID createdBy;
     private OffsetDateTime createdAt;
@@ -62,6 +64,10 @@ public class Assignment {
     public void setCheckConfig(String checkConfig) { this.checkConfig = checkConfig; }
     public String getRubricDefinition() { return rubricDefinition; }
     public void setRubricDefinition(String rubricDefinition) { this.rubricDefinition = rubricDefinition; }
+    public String getAllowedFileTypes() { return allowedFileTypes; }
+    public void setAllowedFileTypes(String allowedFileTypes) { this.allowedFileTypes = allowedFileTypes; }
+    public OffsetDateTime getScheduledPublishAt() { return scheduledPublishAt; }
+    public void setScheduledPublishAt(OffsetDateTime scheduledPublishAt) { this.scheduledPublishAt = scheduledPublishAt; }
     public BigDecimal getWeight() { return weight; }
     public void setWeight(BigDecimal weight) { this.weight = weight; }
     public UUID getCreatedBy() { return createdBy; }

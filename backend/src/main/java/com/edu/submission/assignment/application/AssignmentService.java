@@ -19,8 +19,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -81,6 +84,8 @@ public class AssignmentService {
                 allowLate, allowMultiVersion, effectiveRule);
         JsonNode checkConfig = validateCheckConfig(request.checkConfig());
         JsonNode rubric = validateRubric(request.rubricDefinition());
+        List<String> allowedFileTypes = normalizeAllowedFileTypes(request.allowedFileTypes());
+        validateScheduledPublishAt(request.scheduledPublishAt());
 
         Assignment assignment = new Assignment();
         assignment.setId(Ids.newUuidV7());
@@ -97,6 +102,8 @@ public class AssignmentService {
         assignment.setCheckEnabled(Boolean.TRUE.equals(request.checkEnabled()));
         assignment.setCheckConfig(writeJson(checkConfig, "{}"));
         assignment.setRubricDefinition(writeJson(rubric, "{}"));
+        assignment.setAllowedFileTypes(allowedFileTypesJson(allowedFileTypes));
+        assignment.setScheduledPublishAt(request.scheduledPublishAt());
         assignment.setWeight(request.weight() == null ? BigDecimal.ZERO : request.weight());
         assignment.setCreatedBy(principal.id());
         assignment.setRowVersion(0L);
@@ -150,6 +157,13 @@ public class AssignmentService {
         if (request.rubricDefinition() != null) {
             assignment.setRubricDefinition(writeJson(validateRubric(request.rubricDefinition()), "{}"));
         }
+        if (request.allowedFileTypes() != null) {
+            assignment.setAllowedFileTypes(allowedFileTypesJson(normalizeAllowedFileTypes(request.allowedFileTypes())));
+        }
+        if (request.scheduledPublishAt() != null) {
+            validateScheduledPublishAt(request.scheduledPublishAt());
+            assignment.setScheduledPublishAt(request.scheduledPublishAt());
+        }
         if (request.weight() != null) {
             assignment.setWeight(request.weight());
         }
@@ -174,6 +188,7 @@ public class AssignmentService {
         }
         assignment.setStatus("PUBLISHED");
         assignment.setPublishAt(OffsetDateTime.now(ZoneOffset.UTC));
+        assignment.setScheduledPublishAt(null);
         assignment.setRowVersion((assignment.getRowVersion() == null ? 0L : assignment.getRowVersion()) + 1);
         assignmentMapper.updateById(assignment);
         notificationService.notifyCourseStudents(course.getId(), "ASSIGNMENT_PUBLISHED",
@@ -244,7 +259,8 @@ public class AssignmentService {
 
     public AssignmentView toView(Assignment assignment, boolean includeCheckConfig) {
         return AssignmentView.from(assignment, readJson(assignment.getCheckConfig()),
-                readJson(assignment.getRubricDefinition()), includeCheckConfig);
+                readJson(assignment.getRubricDefinition()),
+                parseAllowedFileTypes(assignment.getAllowedFileTypes()), includeCheckConfig);
     }
 
     private JsonNode validateCheckConfig(JsonNode input) {
@@ -331,6 +347,67 @@ public class AssignmentService {
                     "各维度满分之和必须等于量规总分。");
         }
         return input.deepCopy();
+    }
+
+    private List<String> normalizeAllowedFileTypes(List<String> input) {
+        if (input == null || input.isEmpty()) {
+            return List.of();
+        }
+        Set<String> normalized = new LinkedHashSet<>();
+        for (String raw : input) {
+            if (raw == null) {
+                continue;
+            }
+            String value = raw.trim().toLowerCase(Locale.ROOT);
+            if (value.isEmpty()) {
+                continue;
+            }
+            if (!value.matches("[a-z0-9]{1,16}")) {
+                throw ApiException.unprocessable("ASSIGNMENT_FILE_TYPES_INVALID", "文件类型限制不合法",
+                        "文件类型只能是 1-16 位字母或数字，例如 pdf、java。");
+            }
+            normalized.add(value);
+        }
+        if (normalized.size() > 30) {
+            throw ApiException.unprocessable("ASSIGNMENT_FILE_TYPES_INVALID", "文件类型限制不合法",
+                    "可限制的文件类型不能超过 30 种。");
+        }
+        return List.copyOf(normalized);
+    }
+
+    private String allowedFileTypesJson(List<String> types) {
+        var array = objectMapper.createArrayNode();
+        types.forEach(array::add);
+        return writeJson(array, "[]");
+    }
+
+    private List<String> parseAllowedFileTypes(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            JsonNode node = objectMapper.readTree(json);
+            if (!node.isArray()) {
+                return List.of();
+            }
+            List<String> values = new ArrayList<>();
+            for (JsonNode item : node) {
+                String value = item.asText("");
+                if (!value.isBlank()) {
+                    values.add(value);
+                }
+            }
+            return values;
+        } catch (Exception exception) {
+            return List.of();
+        }
+    }
+
+    private void validateScheduledPublishAt(OffsetDateTime scheduledPublishAt) {
+        if (scheduledPublishAt != null && !scheduledPublishAt.isAfter(OffsetDateTime.now(ZoneOffset.UTC))) {
+            throw ApiException.unprocessable("ASSIGNMENT_SCHEDULED_PUBLISH_INVALID", "定时发布时间不合法",
+                    "定时发布时间必须晚于当前时间。");
+        }
     }
 
     private void validateSchedule(OffsetDateTime openAt, OffsetDateTime deadlineAt,

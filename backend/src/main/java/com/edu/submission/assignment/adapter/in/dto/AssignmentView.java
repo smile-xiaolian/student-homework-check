@@ -4,6 +4,7 @@ import com.edu.submission.assignment.domain.Assignment;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 
 public record AssignmentView(
@@ -22,13 +23,16 @@ public record AssignmentView(
         boolean checkEnabled,
         JsonNode checkConfig,
         JsonNode rubricDefinition,
+        List<String> allowedFileTypes,
+        OffsetDateTime scheduledPublishAt,
         BigDecimal weight,
         OffsetDateTime createdAt,
         OffsetDateTime updatedAt,
         long rowVersion
 ) {
     public static AssignmentView from(Assignment assignment, JsonNode checkConfig,
-                                      JsonNode rubric, boolean includeCheckConfig) {
+                                      JsonNode rubric, List<String> allowedFileTypes,
+                                      boolean includeCheckConfig) {
         return new AssignmentView(
                 assignment.getId(), assignment.getCourseId(), assignment.getTitle(),
                 assignment.getDescription(), assignment.getStatus(), assignment.getPublishAt(),
@@ -36,7 +40,9 @@ public record AssignmentView(
                 Boolean.TRUE.equals(assignment.getAllowLate()),
                 Boolean.TRUE.equals(assignment.getAllowMultiVersion()),
                 assignment.getEffectiveRule(), Boolean.TRUE.equals(assignment.getCheckEnabled()),
-                includeCheckConfig ? checkConfig : null, rubric, assignment.getWeight(),
+                includeCheckConfig ? checkConfig : null, rubric,
+                allowedFileTypes == null ? List.of() : allowedFileTypes,
+                assignment.getScheduledPublishAt(), assignment.getWeight(),
                 assignment.getCreatedAt(), assignment.getUpdatedAt(),
                 assignment.getRowVersion() == null ? 0L : assignment.getRowVersion());
     }

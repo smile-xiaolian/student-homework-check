@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -42,8 +43,10 @@ public class SubmissionController {
 
     @GetMapping("/assignments/{assignmentId}/submissions")
     @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
-    public List<SubmissionView> list(@PathVariable UUID assignmentId) {
-        return submissionService.listForAssignment(CurrentUser.require(), assignmentId);
+    public List<SubmissionView> list(@PathVariable UUID assignmentId,
+                                     @RequestParam(name = "allVersions", required = false, defaultValue = "false")
+                                     boolean allVersions) {
+        return submissionService.listForAssignment(CurrentUser.require(), assignmentId, allVersions);
     }
 
     @GetMapping("/submissions/{id}")

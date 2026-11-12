@@ -43,5 +43,13 @@ public interface SubmissionMapper extends BaseMapper<Submission> {
             ORDER BY s.submitted_at DESC
             """)
     List<Submission> findByAssignment(@Param("assignmentId") UUID assignmentId);
+
+    @Select("""
+            SELECT s.* FROM app.submission s
+            JOIN app.user_account u ON u.id = s.submitter_id
+            WHERE s.assignment_id = #{assignmentId} AND s.is_effective = true
+            ORDER BY s.submitted_at DESC
+            """)
+    List<Submission> findEffectiveByAssignment(@Param("assignmentId") UUID assignmentId);
 }
 

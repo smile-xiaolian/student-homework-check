@@ -28,9 +28,28 @@ const assignmentForm = reactive({
   lateDeadlineAt: '', weight: 0, checkEnabled: true, allowMultiVersion: true,
   effectiveRule: 'LAST_SUBMISSION',
 })
+const rubricRows = ref([
+  { name: '内容完成度', maxScore: 50 },
+  { name: '质量与规范', maxScore: 30 },
+  { name: '思考与创新', maxScore: 20 },
+])
+const rubricTotal = computed(() => rubricRows.value.reduce((sum, row) => sum + (Number(row.maxScore) || 0), 0))
+const fileTypeOptions = ['pdf', 'docx', 'doc', 'txt', 'md', 'java', 'py', 'c', 'cpp', 'h', 'js', 'ts', 'go', 'zip']
+const restrictFileTypes = ref(false)
+const selectedFileTypes = ref<string[]>([...fileTypeOptions])
+const publishMode = ref<'manual' | 'scheduled'>('manual')
+const scheduledPublishAt = ref('')
 const assignmentRules: FormRules = {
   title: [{ required: true, message: '请输入作业标题', trigger: 'blur' }],
   deadlineAt: [{ required: true, message: '请选择截止时间', trigger: 'change' }],
+}
+
+function addRubricRow(): void {
+  rubricRows.value.push({ name: '', maxScore: 10 })
+}
+
+function removeRubricRow(index: number): void {
+  if (rubricRows.value.length > 1) rubricRows.value.splice(index, 1)
 }
 
 const canManage = computed(() => Boolean(course.value && (auth.hasRole('ADMIN') || course.value.ownerId === auth.user?.id)))
@@ -120,6 +139,32 @@ async function createAssignment(): Promise<void> {
       return
     }
   }
+  if (rubricRows.value.some((row) => !row.name.trim())) {
+    ElMessage.warning('请为每个评分维度填写名称')
+    return
+  }
+  if (rubricRows.value.some((row) => !(Number(row.maxScore) > 0) || Number(row.maxScore) > 100)) {
+    ElMessage.warning('评分维度的满分必须为 1-100 之间的数字')
+    return
+  }
+  if (rubricTotal.value <= 0) {
+    ElMessage.warning('评分量规总分必须大于 0')
+    return
+  }
+  if (restrictFileTypes.value && !selectedFileTypes.value.length) {
+    ElMessage.warning('限制文件类型时至少选择一种类型')
+    return
+  }
+  if (publishMode.value === 'scheduled') {
+    if (!scheduledPublishAt.value) {
+      ElMessage.warning('请选择定时发布时间')
+      return
+    }
+    if (new Date(scheduledPublishAt.value) <= new Date()) {
+      ElMessage.warning('定时发布时间必须晚于当前时间')
+      return
+    }
+  }
   try {
     const payload = {
       title: assignmentForm.title,
@@ -139,16 +184,20 @@ async function createAssignment(): Promise<void> {
         exclude: { references: true, template: true },
       } : undefined,
       rubricDefinition: {
-        totalScore: 100,
-        dimensions: [
-          { key: 'content', name: '内容完成度', maxScore: 50 },
-          { key: 'quality', name: '质量与规范', maxScore: 30 },
-          { key: 'innovation', name: '思考与创新', maxScore: 20 },
-        ],
+        totalScore: rubricTotal.value,
+        dimensions: rubricRows.value.map((row, index) => ({
+          key: `dim${index + 1}`,
+          name: row.name.trim(),
+          maxScore: Number(row.maxScore),
+        })),
       },
+      allowedFileTypes: restrictFileTypes.value ? [...selectedFileTypes.value] : undefined,
+      scheduledPublishAt: publishMode.value === 'scheduled' ? toIso(scheduledPublishAt.value) : undefined,
     }
     await assignmentApi.create(courseId, payload)
-    ElMessage.success('作业草稿已创建')
+    ElMessage.success(publishMode.value === 'scheduled'
+      ? '作业草稿已创建，到达设定时间后将自动发布'
+      : '作业草稿已创建')
     assignmentVisible.value = false
     assignments.value = await courseApi.assignments(courseId)
   } catch (error) {
@@ -158,7 +207,10 @@ async function createAssignment(): Promise<void> {
 
 async function publish(item: Assignment): Promise<void> {
   try {
-    await ElMessageBox.confirm('发布后将通知课程学生，是否继续？', '发布作业', { type: 'info' })
+    const message = item.scheduledPublishAt
+      ? `该作业已设定于 ${format(item.scheduledPublishAt)} 自动发布，立即发布将取消原定时。是否立即发布？`
+      : '发布后将通知课程学生，是否继续？'
+    await ElMessageBox.confirm(message, '发布作业', { type: 'info' })
     await assignmentApi.publish(item.id)
     ElMessage.success('作业已发布')
     assignments.value = await courseApi.assignments(courseId)
@@ -207,7 +259,7 @@ onMounted(load)
                   <button v-for="item in assignments" :key="item.id" type="button" class="table-row" @click="router.push(`/assignments/${item.id}`)">
                     <span class="status-dot" :class="item.status.toLowerCase()" />
                     <span class="row-main"><strong>{{ item.title }}</strong><small>截止 {{ format(item.deadlineAt) }} · 权重 {{ item.weight }}%</small></span>
-                    <span class="row-tags"><el-tag size="small" effect="plain" :type="item.status === 'PUBLISHED' ? 'success' : 'info'">{{ item.status === 'PUBLISHED' ? '已发布' : '草稿' }}</el-tag><span v-if="item.checkEnabled" class="check-tag">查重</span></span>
+                    <span class="row-tags"><el-tag size="small" effect="plain" :type="item.status === 'PUBLISHED' ? 'success' : 'info'">{{ item.status === 'PUBLISHED' ? '已发布' : '草稿' }}</el-tag><el-tag v-if="item.status === 'DRAFT' && item.scheduledPublishAt" size="small" effect="plain" type="warning">定时 {{ format(item.scheduledPublishAt) }}</el-tag><span v-if="item.checkEnabled" class="check-tag">查重</span></span>
                     <el-button v-if="canInstruct && item.status === 'DRAFT'" size="small" plain @click.stop="publish(item)">发布</el-button>
                     <span class="arrow">→</span>
                   </button>
@@ -253,6 +305,48 @@ onMounted(load)
           </div>
         </el-form-item>
         <el-form-item v-if="assignmentForm.allowLate" label="补交截止时间"><el-date-picker v-model="assignmentForm.lateDeadlineAt" type="datetime" value-format="YYYY-MM-DDTHH:mm" style="width: 100%" /></el-form-item>
+        <el-form-item label="评分量规">
+          <div class="rubric-editor">
+            <div v-for="(row, index) in rubricRows" :key="index" class="rubric-row">
+              <el-input v-model="row.name" placeholder="评分维度名称，如 内容完成度" />
+              <el-input-number v-model="row.maxScore" :min="1" :max="100" :precision="0" controls-position="right" />
+              <el-button link type="danger" :disabled="rubricRows.length <= 1" @click="removeRubricRow(index)">删除</el-button>
+            </div>
+            <div class="rubric-foot">
+              <el-button size="small" @click="addRubricRow">＋ 添加维度</el-button>
+              <span>合计 <b>{{ rubricTotal }}</b> 分</span>
+            </div>
+          </div>
+        </el-form-item>
+        <el-form-item label="提交文件类型">
+          <div class="file-type-editor">
+            <el-checkbox v-model="restrictFileTypes">限制本次作业可提交的文件类型</el-checkbox>
+            <template v-if="restrictFileTypes">
+              <el-checkbox-group v-model="selectedFileTypes" class="type-group">
+                <el-checkbox v-for="type in fileTypeOptions" :key="type" :value="type">{{ type }}</el-checkbox>
+              </el-checkbox-group>
+              <p class="type-hint">仅允许学生上传勾选的类型（仍受系统全局白名单约束）。</p>
+            </template>
+            <p v-else class="type-hint">不限制时沿用系统配置的允许类型（PDF、Word、文本与常见源码文件）。</p>
+          </div>
+        </el-form-item>
+        <el-form-item label="发布方式">
+          <div class="publish-mode">
+            <el-radio-group v-model="publishMode">
+              <el-radio value="manual">保存草稿，稍后手动发布</el-radio>
+              <el-radio value="scheduled">定时自动发布</el-radio>
+            </el-radio-group>
+            <el-date-picker
+              v-if="publishMode === 'scheduled'"
+              v-model="scheduledPublishAt"
+              type="datetime"
+              value-format="YYYY-MM-DDTHH:mm"
+              placeholder="选择发布时间"
+              style="width: 100%"
+            />
+            <p v-if="publishMode === 'scheduled'" class="type-hint">到达设定时间后系统将自动发布并通知课程学生。</p>
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer><el-button @click="assignmentVisible = false">取消</el-button><el-button type="primary" @click="createAssignment">保存草稿</el-button></template>
     </el-dialog>
@@ -312,5 +406,14 @@ onMounted(load)
 .danger-row { margin-top: 16px; border: 1px solid #f3d7d2 !important; background: #fffafa; border-radius: 12px; padding: 15px !important; align-items: center; }
 .form-row { display: grid; grid-template-columns: 1.2fr .8fr; gap: 14px; }
 .switch-grid { display: flex; gap: 20px; flex-wrap: wrap; }
+.rubric-editor { width: 100%; display: grid; gap: 8px; }
+.rubric-row { display: grid; grid-template-columns: 1fr 130px auto; gap: 8px; align-items: center; }
+.rubric-foot { display: flex; justify-content: space-between; align-items: center; }
+.rubric-foot span { color: #74818e; font-size: 12px; }
+.rubric-foot b { color: #0f766e; font-size: 14px; }
+.file-type-editor { width: 100%; }
+.type-group { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 8px; }
+.type-hint { margin: 8px 0 0; color: #8c97a3; font-size: 11px; line-height: 1.6; }
+.publish-mode { width: 100%; display: grid; gap: 10px; }
 @media (max-width: 760px) { .course-hero { flex-direction: column; padding: 24px; } .invite-box { align-self: stretch; } .metric-row { grid-template-columns: 1fr 1fr; } .metric-row > div { padding: 12px 17px; } .metric-row > div:nth-child(3) { border-left: 0; border-top: 1px solid #edf1f2; } .metric-row > div:nth-child(4) { border-top: 1px solid #edf1f2; } .form-row { grid-template-columns: 1fr; } .row-tags { display: none; } }
 </style>

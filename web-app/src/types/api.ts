@@ -85,6 +85,8 @@ export interface Assignment {
   checkEnabled: boolean
   checkConfig: Record<string, unknown> | null
   rubricDefinition: { dimensions?: RubricDimension[]; totalScore?: number }
+  allowedFileTypes?: string[]
+  scheduledPublishAt?: string | null
   weight: number
   createdAt: string
   updatedAt: string
