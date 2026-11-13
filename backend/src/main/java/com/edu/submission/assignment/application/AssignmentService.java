@@ -220,6 +220,21 @@ public class AssignmentService {
         return toView(assignment, true);
     }
 
+    /** 教师端“允许学生查看评审结果”开关：独立于成绩发布流程的作业级可见性控制。 */
+    @Transactional
+    public AssignmentView putResultsVisibility(UserPrincipal principal, UUID assignmentId, boolean visible) {
+        Assignment assignment = requireAssignment(assignmentId);
+        Course course = courseService.requireCourse(assignment.getCourseId());
+        courseService.requireManage(course, principal);
+        assertCourseActive(course);
+        assignment.setResultsVisible(visible);
+        assignment.setRowVersion((assignment.getRowVersion() == null ? 0L : assignment.getRowVersion()) + 1);
+        assignmentMapper.updateById(assignment);
+        auditService.recordUser(principal.id(), "assignment.results_visibility.update", "ASSIGNMENT",
+                assignmentId, "SUCCESS", Map.of("visible", visible), null);
+        return toView(assignment, true);
+    }
+
     @Transactional(readOnly = true)
     public JsonNode getCheckConfig(UserPrincipal principal, UUID assignmentId) {
         Assignment assignment = requireAssignment(assignmentId);

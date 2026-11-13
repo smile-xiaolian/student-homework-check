@@ -45,11 +45,18 @@ public class ReviewService {
     @Transactional(readOnly = true)
     public ReviewView getReview(UserPrincipal principal, UUID submissionId) {
         SubmissionRef submission = requireSubmissionReadable(principal, submissionId);
+        if ("STUDENT".equals(principal.role().name())
+                && !submission.submitterId().equals(principal.id())) {
+            throw ApiException.forbidden("REVIEW_FORBIDDEN", "无权查看评审", "学生只能查看本人提交的评审结果。");
+        }
+        // 学生可见：已发布成绩，或作业开启“评审结果学生可见”后的已提交评审（DRAFT 草稿始终不可见）
+        boolean resultsVisible = assignmentResultsVisible(submission.assignmentId());
         List<ReviewView> rows = jdbcTemplate.query(
                 "SELECT id, submission_id, reviewer_id, status, raw_score, late_deduction, final_score, " +
                         "dimension_scores::text AS dimension_scores, annotations::text AS annotations, " +
                         "check_verdict, comment, submitted_at, updated_at, row_version " +
-                        "FROM app.grade WHERE submission_id = ? AND (reviewer_id = ? OR status = 'PUBLISHED') " +
+                        "FROM app.grade WHERE submission_id = ? AND (reviewer_id = ? OR status = 'PUBLISHED' " +
+                        "OR (status = 'SUBMITTED' AND ?)) " +
                         "ORDER BY updated_at DESC LIMIT 1",
                 (rs, index) -> new ReviewView(
                         rs.getObject("id", UUID.class), rs.getObject("submission_id", UUID.class),
@@ -59,7 +66,7 @@ public class ReviewService {
                         readJson(rs.getString("annotations")), rs.getString("check_verdict"),
                         rs.getString("comment"), rs.getObject("submitted_at", OffsetDateTime.class),
                         rs.getObject("updated_at", OffsetDateTime.class), rs.getLong("row_version")),
-                submissionId, principal.id());
+                submissionId, principal.id(), resultsVisible);
         if (!rows.isEmpty()) {
             return rows.get(0);
         }
@@ -197,8 +204,11 @@ public class ReviewService {
             throw ApiException.notFound("GRADE_NOT_FOUND", "成绩尚未生成", "评审完成后成绩才会生成。");
         }
         GradeView grade = rows.get(0);
-        if ("STUDENT".equals(principal.role().name()) && !grade.published()) {
-            throw ApiException.notFound("GRADE_NOT_PUBLISHED", "成绩尚未发布", "请等待教师发布成绩。");
+        if ("STUDENT".equals(principal.role().name()) && !grade.published()
+                && !(assignmentResultsVisible(submission.assignmentId())
+                        && !"DRAFT".equals(grade.status()))) {
+            throw ApiException.notFound("GRADE_NOT_PUBLISHED", "成绩尚未开放查看",
+                    "请等待教师开放评审结果查看。");
         }
         return grade;
     }
@@ -283,6 +293,13 @@ public class ReviewService {
             throw ApiException.notFound("SUBMISSION_NOT_FOUND", "提交不存在", "提交可能已被删除。");
         }
         return rows.get(0);
+    }
+
+    private boolean assignmentResultsVisible(UUID assignmentId) {
+        List<Boolean> rows = jdbcTemplate.query(
+                "SELECT results_visible FROM app.assignment WHERE id = ?",
+                (rs, index) -> rs.getBoolean("results_visible"), assignmentId);
+        return !rows.isEmpty() && Boolean.TRUE.equals(rows.get(0));
     }
 
     private UUID assignmentCourse(UUID assignmentId) {

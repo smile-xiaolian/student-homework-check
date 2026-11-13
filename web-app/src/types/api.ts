@@ -87,6 +87,7 @@ export interface Assignment {
   rubricDefinition: { dimensions?: RubricDimension[]; totalScore?: number }
   allowedFileTypes?: string[]
   scheduledPublishAt?: string | null
+  resultsVisible: boolean
   weight: number
   createdAt: string
   updatedAt: string
@@ -239,6 +240,7 @@ export interface NotificationItem {
   content: string
   targetType: string | null
   targetId: string | null
+  submissionId?: string | null
   read: boolean
   readAt: string | null
   createdAt: string

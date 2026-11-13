@@ -39,6 +39,8 @@ const reviewForm = reactive({ rawScore: 0, checkVerdict: 'ORIGINAL', comment: ''
 const showAllVersions = ref(false)
 const assignmentDialogVisible = ref(false)
 const editAssignment = ref<Assignment | null>(null)
+const resultsVisible = ref(false)
+const myReview = ref<Review | null>(null)
 
 const canManage = computed(() => Boolean(course.value && (auth.hasRole('ADMIN') || course.value.ownerId === auth.user?.id)))
 const canInstruct = computed(() => canManage.value || members.value.some((item) =>
@@ -100,7 +102,9 @@ async function load(): Promise<void> {
     ])
     course.value = courseData
     members.value = memberData
+    resultsVisible.value = Boolean(assignment.value.resultsVisible)
     await loadSubmissions()
+    if (isStudent.value) await loadMyReview()
   } catch (error) {
     ElMessage.error(errorMessage(error))
     router.replace('/courses')
@@ -113,6 +117,39 @@ async function loadSubmissions(): Promise<void> {
   if (isStudent.value) submissions.value = await submissionApi.mine(assignmentId)
   else if (canReview.value) submissions.value = await submissionApi.list(assignmentId, showAllVersions.value)
   else submissions.value = []
+}
+
+/** 学生端：拉取本人生效提交的评审结果（教师未开放时返回 NOT_STARTED，则展示占位） */
+async function loadMyReview(): Promise<void> {
+  const effective = submissions.value.find((item) => item.effective)
+  if (!effective) {
+    myReview.value = null
+    return
+  }
+  try {
+    myReview.value = await reviewApi.get(effective.id)
+  } catch {
+    myReview.value = null
+  }
+}
+
+/** 教师端：切换"允许学生查看评审结果" */
+async function toggleResultsVisibility(): Promise<void> {
+  if (!assignment.value) return
+  const next = resultsVisible.value
+  try {
+    assignment.value = await assignmentApi.updateResultsVisibility(assignment.value.id, next)
+    ElMessage.success(next ? '已允许学生查看评审结果' : '已关闭学生查看评审结果')
+  } catch (error) {
+    resultsVisible.value = !next
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+function verdictText(verdict: string | null): string {
+  return ({
+    ORIGINAL: '原创', SUSPECTED_PLAGIARISM: '疑似抄袭', INTERVIEW_REQUIRED: '需要面谈',
+  } as Record<string, string>)[verdict ?? ''] ?? '—'
 }
 
 function chooseFiles(): void {
@@ -351,6 +388,7 @@ onMounted(load)
                 <div class="section-title">
                   <div><h2>{{ isStudent ? '我的提交历史' : '学生提交' }}</h2><p>{{ isStudent ? '查重完成后可查看报告并等待评审。' : (showAllVersions ? '按提交时间展示全部学生与全部版本。' : '每位学生仅展示最新生效版本；如需切换生效版本，请打开“全部版本”。') }}</p></div>
                   <div v-if="!isStudent" class="section-actions">
+                    <label v-if="canManage" class="all-versions-toggle"><el-switch v-model="resultsVisible" size="small" @change="toggleResultsVisibility" /><span>评审结果学生可见</span></label>
                     <label class="all-versions-toggle"><el-switch v-model="showAllVersions" size="small" @change="loadSubmissions" /><span>全部版本</span></label>
                     <el-button size="small" @click="loadSubmissions">刷新</el-button>
                   </div>
@@ -368,12 +406,26 @@ onMounted(load)
                     <template #default="{ row }">
                       <el-button v-if="row.files?.length" link type="primary" @click="openAttachments(row)">附件 {{ row.files.length }}</el-button>
                       <el-button v-if="canOpenReport(row)" link type="primary" @click="router.push(`/submissions/${row.id}/report`)">查重报告</el-button>
-                      <el-button v-if="canReview && canOpenReport(row)" link type="primary" @click="openReview(row)">评审</el-button>
+                      <el-button v-if="canReview && canOpenReport(row)" link type="primary" @click="openReview(row)">{{ ['REVIEWED', 'PUBLISHED'].includes(row.status) ? '修改评审结果' : '评审' }}</el-button>
                       <el-button v-if="canInstruct && assignment.effectiveRule === 'MANUAL' && !row.effective" link @click="setEffective(row)">设为生效</el-button>
                     </template>
                   </el-table-column>
                 </el-table>
                 <div v-else class="empty-line">暂无提交记录</div>
+              </section>
+
+              <section v-if="isStudent" class="surface surface-pad my-review-panel">
+                <div class="section-title"><div><h2>教师评审</h2><p>教师完成评审并开放查看后，评审结果显示在这里。</p></div></div>
+                <template v-if="myReview && myReview.status !== 'NOT_STARTED'">
+                  <div class="my-review-grid">
+                    <div><span>最终得分</span><b>{{ myReview.finalScore ?? '—' }}<small> / 原始 {{ myReview.rawScore ?? '—' }}</small></b></div>
+                    <div><span>迟交扣分</span><b>-{{ myReview.lateDeduction ?? 0 }}</b></div>
+                    <div><span>查重结论</span><b>{{ verdictText(myReview.checkVerdict) }}</b></div>
+                    <div><span>评审时间</span><b>{{ myReview.submittedAt ? format(myReview.submittedAt) : '—' }}</b></div>
+                  </div>
+                  <p v-if="myReview.comment" class="my-review-comment">{{ myReview.comment }}</p>
+                </template>
+                <div v-else class="empty-line">教师尚未完成评审或尚未开放查看。</div>
               </section>
             </div>
 
@@ -479,6 +531,13 @@ onMounted(load)
 .submit-actions { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-top: 15px; }
 .submit-actions span { color: #8995a1; font-size: 11px; }
 .history-panel { margin-bottom: 20px; }
+.my-review-panel { margin-bottom: 20px; }
+.my-review-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 13px; }
+.my-review-grid > div { background: #f6f9f9; border-radius: 10px; padding: 13px 15px; }
+.my-review-grid span { display: block; color: #7d8996; font-size: 11px; margin-bottom: 6px; }
+.my-review-grid b { font-size: 20px; letter-spacing: -.04em; }
+.my-review-grid b small { font-size: 11px; font-weight: 400; color: #8994a1; margin-left: 3px; }
+.my-review-comment { margin: 15px 0 0; color: #4f5d69; font-size: 12px; line-height: 1.9; background: #fcfdfd; border: 1px solid #e6ecec; border-radius: 10px; padding: 13px 15px; white-space: pre-wrap; }
 .review-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-bottom: 16px; }
 .review-metrics span { background: #f6f9f9; border-radius: 9px; padding: 10px 12px; font-size: 10px; color: #85919e; display: flex; flex-direction: column; gap: 3px; }
 .review-metrics b { font-size: 20px; color: #24413e; }

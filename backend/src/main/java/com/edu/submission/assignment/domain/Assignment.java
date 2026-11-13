@@ -28,6 +28,7 @@ public class Assignment {
     private String rubricDefinition;
     private String allowedFileTypes;
     private OffsetDateTime scheduledPublishAt;
+    private Boolean resultsVisible;
     private BigDecimal weight;
     private UUID createdBy;
     private OffsetDateTime createdAt;
@@ -68,6 +69,8 @@ public class Assignment {
     public void setAllowedFileTypes(String allowedFileTypes) { this.allowedFileTypes = allowedFileTypes; }
     public OffsetDateTime getScheduledPublishAt() { return scheduledPublishAt; }
     public void setScheduledPublishAt(OffsetDateTime scheduledPublishAt) { this.scheduledPublishAt = scheduledPublishAt; }
+    public Boolean getResultsVisible() { return resultsVisible; }
+    public void setResultsVisible(Boolean resultsVisible) { this.resultsVisible = resultsVisible; }
     public BigDecimal getWeight() { return weight; }
     public void setWeight(BigDecimal weight) { this.weight = weight; }
     public UUID getCreatedBy() { return createdBy; }

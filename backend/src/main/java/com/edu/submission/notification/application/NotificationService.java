@@ -17,6 +17,7 @@ import java.time.ZoneOffset;
 import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,24 +26,46 @@ public class NotificationService {
 
     private final NotificationMapper notificationMapper;
     private final CourseMemberMapper courseMemberMapper;
+    private final JdbcTemplate jdbcTemplate;
 
     public NotificationService(NotificationMapper notificationMapper,
-                               CourseMemberMapper courseMemberMapper) {
+                               CourseMemberMapper courseMemberMapper,
+                               JdbcTemplate jdbcTemplate) {
         this.notificationMapper = notificationMapper;
         this.courseMemberMapper = courseMemberMapper;
+        this.jdbcTemplate = jdbcTemplate;
     }
 
     @Transactional(readOnly = true)
     public PageResult<NotificationView> list(UserPrincipal principal, Integer page, Integer size) {
         PageQuery query = PageQuery.of(page, size);
-        List<Notification> notifications = notificationMapper.selectList(new LambdaQueryWrapper<Notification>()
-                .eq(Notification::getRecipientId, principal.id())
-                .orderByDesc(Notification::getCreatedAt)
-                .last("LIMIT " + query.size() + " OFFSET " + query.offset()));
-        long total = notificationMapper.selectCount(new LambdaQueryWrapper<Notification>()
+        // 关联 check_report：查重报告类通知补充所属提交 ID，供前端跳转到报告页
+        List<NotificationView> items = jdbcTemplate.query("""
+                        SELECT n.id, n.notification_type, n.title, n.content, n.target_type, n.target_id,
+                               n.is_read, n.read_at, n.created_at, cr.submission_id AS submission_id
+                        FROM app.notification n
+                        LEFT JOIN app.check_report cr
+                               ON n.target_type = 'CHECK_REPORT' AND cr.id = n.target_id
+                        WHERE n.recipient_id = ?
+                        ORDER BY n.created_at DESC
+                        LIMIT ? OFFSET ?
+                        """,
+                (rs, index) -> new NotificationView(
+                        rs.getObject("id", UUID.class),
+                        rs.getString("notification_type"),
+                        rs.getString("title"),
+                        rs.getString("content"),
+                        rs.getString("target_type"),
+                        rs.getObject("target_id", UUID.class),
+                        rs.getObject("submission_id", UUID.class),
+                        rs.getBoolean("is_read"),
+                        rs.getObject("read_at", OffsetDateTime.class),
+                        rs.getObject("created_at", OffsetDateTime.class)),
+                principal.id(), query.size(), query.offset());
+        Long total = notificationMapper.selectCount(new LambdaQueryWrapper<Notification>()
                 .eq(Notification::getRecipientId, principal.id()));
-        return new PageResult<>(notifications.stream().map(NotificationView::from).toList(),
-                Pagination.of(query.page(), query.size(), total));
+        return new PageResult<>(items,
+                Pagination.of(query.page(), query.size(), total == null ? 0 : total));
     }
 
     @Transactional(readOnly = true)

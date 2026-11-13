@@ -3,6 +3,7 @@ package com.edu.submission.assignment.adapter.in;
 import com.edu.submission.assignment.adapter.in.dto.AssignmentCreateRequest;
 import com.edu.submission.assignment.adapter.in.dto.AssignmentUpdateRequest;
 import com.edu.submission.assignment.adapter.in.dto.AssignmentView;
+import com.edu.submission.assignment.adapter.in.dto.ResultsVisibilityRequest;
 import com.edu.submission.assignment.application.AssignmentService;
 import com.edu.submission.shared.api.Etags;
 import com.edu.submission.shared.security.CurrentUser;
@@ -76,6 +77,16 @@ public class AssignmentController {
     @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
     public ResponseEntity<AssignmentView> publish(@PathVariable UUID id) {
         AssignmentView view = assignmentService.publish(CurrentUser.require(), id);
+        return ResponseEntity.ok().header(HttpHeaders.ETAG, Etags.format(view.rowVersion())).body(view);
+    }
+
+    @PutMapping("/assignments/{id}/results-visibility")
+    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
+    public ResponseEntity<AssignmentView> putResultsVisibility(
+            @PathVariable UUID id,
+            @Valid @RequestBody ResultsVisibilityRequest request) {
+        AssignmentView view = assignmentService.putResultsVisibility(
+                CurrentUser.require(), id, Boolean.TRUE.equals(request.visible()));
         return ResponseEntity.ok().header(HttpHeaders.ETAG, Etags.format(view.rowVersion())).body(view);
     }
 

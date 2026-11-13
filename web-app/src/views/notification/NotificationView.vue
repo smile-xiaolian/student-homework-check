@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { notificationApi } from '@/api/notifications'
 import { errorMessage } from '@/api/http'
 import { useNotificationStore } from '@/stores/notification'
 import type { NotificationItem, Pagination } from '@/types/api'
 
+const router = useRouter()
 const store = useNotificationStore()
 const loading = ref(false)
 const filter = ref<'ALL' | 'UNREAD'>('ALL')
@@ -21,6 +23,23 @@ function typeLabel(type: string): string {
     GRADE_PUBLISHED: '成绩发布', COURSE_ANNOUNCEMENT: '课程公告', SYSTEM: '系统通知',
   } as Record<string, string>)[type] ?? '通知'
 }
+
+/** 根据通知目标解析可跳转的详情页路由；无法识别目标时返回 null。 */
+function resolveLink(item: NotificationItem): string | null {
+  if (item.targetType === 'ASSIGNMENT' && item.targetId) return `/assignments/${item.targetId}`
+  if (item.targetType === 'SUBMISSION' && item.targetId) return `/submissions/${item.targetId}/report`
+  // 查重报告类通知存的是报告 ID，报告页路由以提交 ID 定位
+  if (item.targetType === 'CHECK_REPORT' && item.submissionId) return `/submissions/${item.submissionId}/report`
+  return null
+}
+
+function linkLabel(item: NotificationItem): string {
+  if (item.targetType === 'ASSIGNMENT') return '查看作业'
+  if (item.targetType === 'CHECK_REPORT' || item.targetType === 'SUBMISSION') return '查看查重报告'
+  return '查看详情'
+}
+
+const selectedLink = computed(() => selected.value ? resolveLink(selected.value) : null)
 
 function format(value: string): string {
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value))
@@ -98,6 +117,9 @@ onMounted(() => load())
           <h2>{{ selected.title }}</h2>
           <p class="detail-time">{{ format(selected.createdAt) }} · {{ selected.read ? '已读' : '未读' }}</p>
           <div class="detail-content">{{ selected.content }}</div>
+          <div v-if="selectedLink" class="detail-actions">
+            <el-button type="primary" size="small" @click="router.push(selectedLink)">{{ linkLabel(selected) }} →</el-button>
+          </div>
         </template>
         <div v-else class="empty-detail"><span>◉</span><h3>选择一条通知</h3><p>通知正文会在这里展开。</p></div>
       </aside>
@@ -131,6 +153,7 @@ onMounted(() => load())
 .detail-card h2 { font-size: 22px; letter-spacing: -.03em; line-height: 1.4; margin-bottom: 9px; }
 .detail-time { color: #97a2ad; font-size: 10px; margin-bottom: 21px; }
 .detail-content { color: #52606d; font-size: 13px; line-height: 1.9; white-space: pre-wrap; }
+.detail-actions { margin-top: 22px; }
 .empty-detail { height: 300px; display: grid; place-content: center; text-align: center; color: #9ca7b1; }
 .empty-detail > span { font-size: 37px; color: #b7c8c4; margin-bottom: 13px; }
 .empty-detail h3 { color: #57646f; margin-bottom: 6px; }

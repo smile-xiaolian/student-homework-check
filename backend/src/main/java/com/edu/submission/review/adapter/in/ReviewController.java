@@ -41,8 +41,8 @@ public class ReviewController {
     }
 
     @GetMapping("/submissions/{id}/review")
-    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
     public ReviewView review(@PathVariable UUID id) {
+        // 不做角色限制：教师/助查看评审草稿，学生在“结果可见”时查看本人评审结果（由 Service 层鉴权）
         return reviewService.getReview(CurrentUser.require(), id);
     }
 

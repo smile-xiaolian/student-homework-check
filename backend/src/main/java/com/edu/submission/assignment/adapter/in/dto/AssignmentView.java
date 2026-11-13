@@ -25,6 +25,7 @@ public record AssignmentView(
         JsonNode rubricDefinition,
         List<String> allowedFileTypes,
         OffsetDateTime scheduledPublishAt,
+        boolean resultsVisible,
         BigDecimal weight,
         OffsetDateTime createdAt,
         OffsetDateTime updatedAt,
@@ -42,7 +43,8 @@ public record AssignmentView(
                 assignment.getEffectiveRule(), Boolean.TRUE.equals(assignment.getCheckEnabled()),
                 includeCheckConfig ? checkConfig : null, rubric,
                 allowedFileTypes == null ? List.of() : allowedFileTypes,
-                assignment.getScheduledPublishAt(), assignment.getWeight(),
+                assignment.getScheduledPublishAt(),
+                Boolean.TRUE.equals(assignment.getResultsVisible()), assignment.getWeight(),
                 assignment.getCreatedAt(), assignment.getUpdatedAt(),
                 assignment.getRowVersion() == null ? 0L : assignment.getRowVersion());
     }

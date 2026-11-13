@@ -16,6 +16,9 @@ export const assignmentApi = {
   publish(id: string) {
     return http.post<Assignment>(`/assignments/${id}/publish`).then((r) => r.data)
   },
+  updateResultsVisibility(id: string, visible: boolean) {
+    return http.put<Assignment>(`/assignments/${id}/results-visibility`, { visible }).then((r) => r.data)
+  },
   remove(id: string) {
     return http.delete(`/assignments/${id}`)
   },
