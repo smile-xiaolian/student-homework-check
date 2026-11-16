@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, type UploadFile, type UploadInstance } from 'element-plus'
 import { adminApi } from '@/api/admin'
 import { errorMessage } from '@/api/http'
-import type { AdminUser, Pagination, Role } from '@/types/api'
+import type { AdminUser, ImportResult, Pagination, Role } from '@/types/api'
 
 const loading = ref(false)
 const users = ref<AdminUser[]>([])
@@ -14,6 +14,11 @@ const createForm = reactive({ userNo: '', loginName: '', displayName: '', email:
 const editVisible = ref(false)
 const editing = ref<AdminUser | null>(null)
 const editForm = reactive({ displayName: '', email: '', phone: '', role: 'STUDENT' as Role })
+
+/** Excel 批量导入 */
+const importUploadRef = ref<UploadInstance>()
+const importing = ref(false)
+const templateLoading = ref(false)
 
 const roleLabel: Record<Role, string> = { STUDENT: '学生', TEACHER: '教师', ASSISTANT: '助教', ADMIN: '管理员' }
 const statusLabel: Record<string, string> = { ACTIVE: '正常', LOCKED: '已锁定', DISABLED: '已停用', PENDING: '待激活' }
@@ -99,12 +104,78 @@ async function resetPassword(user: AdminUser): Promise<void> {
   }
 }
 
+/** 选择 xlsx 后立即导入 */
+function onImportFileChange(uploadFile: UploadFile): void {
+  const raw = uploadFile.raw
+  if (!raw) return
+  if (raw.name.split('.').pop()?.toLowerCase() !== 'xlsx') {
+    ElMessage.error('请上传 .xlsx 格式的 Excel 文件')
+    importUploadRef.value?.clearFiles()
+    return
+  }
+  void importUsers(raw)
+}
+
+async function importUsers(file: File): Promise<void> {
+  importing.value = true
+  try {
+    const result = await adminApi.importUsers(file)
+    showImportResult(result)
+    await load()
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    importing.value = false
+    importUploadRef.value?.clearFiles()
+  }
+}
+
+function showImportResult(result: ImportResult): void {
+  const lines = [`成功导入 ${result.succeeded} 人，跳过 ${result.skipped} 人。`]
+  if (result.errors.length) {
+    lines.push('')
+    lines.push(`错误明细（共 ${result.errors.length} 条）：`)
+    for (const err of result.errors) lines.push(`第 ${err.row} 行：${err.message}`)
+  }
+  ElMessageBox.alert(lines.join('\n'), '批量导入结果', {
+    type: result.errors.length ? 'warning' : 'success',
+    confirmButtonText: '确定',
+  })
+}
+
+async function downloadTemplate(): Promise<void> {
+  templateLoading.value = true
+  try {
+    const blob = await adminApi.importUsersTemplate()
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `用户导入模板-${new Date().toISOString().slice(0, 10)}.xlsx`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    templateLoading.value = false
+  }
+}
+
 onMounted(() => load())
 </script>
 
 <template>
   <div class="page">
-    <div class="page-head"><div><p class="eyebrow">ADMINISTRATION</p><h1>用户管理</h1><p>维护账号、角色与访问状态。</p></div><el-button type="primary" @click="createVisible = true">＋ 新建用户</el-button></div>
+    <div class="page-head"><div><p class="eyebrow">ADMINISTRATION</p><h1>用户管理</h1><p>维护账号、角色与访问状态。</p></div>
+      <div class="head-actions">
+        <el-upload ref="importUploadRef" :show-file-list="false" :auto-upload="false" :limit="1" accept=".xlsx" :on-change="onImportFileChange">
+          <el-button :loading="importing">批量导入</el-button>
+        </el-upload>
+        <el-button :loading="templateLoading" @click="downloadTemplate">下载模板</el-button>
+        <el-button type="primary" @click="createVisible = true">＋ 新建用户</el-button>
+      </div>
+    </div>
     <section class="surface">
       <div class="filter-bar">
         <el-input v-model="query.q" placeholder="姓名 / 学工号 / 登录名" clearable style="max-width: 250px" @keyup.enter="load(1)" />
@@ -159,6 +230,7 @@ onMounted(() => load())
 
 <style scoped>
 .eyebrow { color: #0f766e; font-size: 11px; font-weight: 800; letter-spacing: .14em; margin-bottom: 9px; }
+.head-actions { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; }
 .surface { overflow: hidden; }
 .filter-bar { display: flex; gap: 9px; align-items: center; padding: 17px 19px; flex-wrap: wrap; border-bottom: 1px solid #edf1f2; }
 .total { margin-left: auto; color: #909ba5; font-size: 10px; }

@@ -15,5 +15,8 @@ public interface UserAccountMapper extends BaseMapper<UserAccount> {
             LIMIT 1
             """)
     UserAccount findByLogin(@Param("login") String login);
+
+    @Select("SELECT * FROM app.user_account WHERE user_no = #{userNo} LIMIT 1")
+    UserAccount findByUserNo(@Param("userNo") String userNo);
 }
 

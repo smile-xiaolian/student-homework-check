@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import axios from 'axios'
+import { ElMessage, ElMessageBox, type UploadFile, type UploadInstance } from 'element-plus'
 import { courseApi } from '@/api/courses'
 import { assignmentApi } from '@/api/assignments'
 import { errorMessage } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
 import AssignmentEditDialog from '@/components/AssignmentEditDialog.vue'
-import type { Assignment, Course, CourseMember } from '@/types/api'
+import type { Assignment, Course, CourseMember, ImportResult } from '@/types/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -22,6 +23,13 @@ const assignmentVisible = ref(false)
 const editAssignment = ref<Assignment | null>(null)
 const memberVisible = ref(false)
 const memberForm = reactive({ userNo: '', memberRole: 'STUDENT' })
+const courseEditVisible = ref(false)
+const savingCourse = ref(false)
+const courseEditForm = reactive({ name: '', description: '' })
+
+/** 花名册 Excel 批量导入 */
+const memberImportRef = ref<UploadInstance>()
+const memberImporting = ref(false)
 
 const canManage = computed(() => Boolean(course.value && (auth.hasRole('ADMIN') || course.value.ownerId === auth.user?.id)))
 const canInstruct = computed(() => canManage.value || members.value.some((item) =>
@@ -136,6 +144,135 @@ async function publish(item: Assignment): Promise<void> {
   }
 }
 
+async function closeAssignment(item: Assignment): Promise<void> {
+  try {
+    await ElMessageBox.confirm(`确定关闭作业「${item.title}」吗？关闭后学生将无法继续提交。`, '关闭作业', { type: 'warning' })
+    await assignmentApi.close(item.id)
+    ElMessage.success('作业已关闭')
+    assignments.value = await courseApi.assignments(courseId)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  }
+}
+
+async function archiveAssignment(item: Assignment): Promise<void> {
+  try {
+    await ElMessageBox.prompt(
+      `归档后作业将只读并隐藏编辑按钮。请输入作业标题「${item.title}」以确认归档。`,
+      '归档作业', {
+        confirmButtonText: '确认归档', type: 'warning',
+        inputValidator: (value) => value === item.title || '输入的作业标题不一致',
+      },
+    )
+    await assignmentApi.archive(item.id)
+    ElMessage.success('作业已归档')
+    assignments.value = await courseApi.assignments(courseId)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  }
+}
+
+function assignmentStatusLabel(status: string): string {
+  return ({ DRAFT: '草稿', PUBLISHED: '已发布', CLOSED: '已关闭', ARCHIVED: '已归档' } as Record<string, string>)[status] ?? status
+}
+
+function assignmentStatusType(status: string): 'success' | 'warning' | 'info' | 'primary' {
+  if (status === 'PUBLISHED') return 'success'
+  if (status === 'CLOSED') return 'warning'
+  if (status === 'ARCHIVED') return 'info'
+  return 'info'
+}
+
+function openEditCourse(): void {
+  if (!course.value) return
+  courseEditForm.name = course.value.name
+  courseEditForm.description = course.value.description ?? ''
+  courseEditVisible.value = true
+}
+
+async function saveCourse(): Promise<void> {
+  if (!course.value) return
+  if (!courseEditForm.name.trim()) {
+    ElMessage.warning('请输入课程名称')
+    return
+  }
+  savingCourse.value = true
+  try {
+    const updated = await courseApi.update(course.value.id, {
+      name: courseEditForm.name.trim(),
+      description: courseEditForm.description,
+    }, `"row-${course.value.rowVersion}"`)
+    course.value = updated
+    ElMessage.success('课程已更新')
+    courseEditVisible.value = false
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 412) {
+      ElMessage.error('课程已被更新，请刷新后重试')
+    } else {
+      ElMessage.error(errorMessage(error))
+    }
+  } finally {
+    savingCourse.value = false
+  }
+}
+
+async function removeMember(item: CourseMember): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确定将「${item.displayName}」（${item.userNo}）移出课程吗？`,
+      '移除成员', { type: 'warning', confirmButtonText: '移除', confirmButtonClass: 'el-button--danger' },
+    )
+    await courseApi.removeMember(courseId, item.userId)
+    ElMessage.success('成员已移除')
+    members.value = await courseApi.members(courseId)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  }
+}
+
+function goLibraries(): void {
+  router.push(`/courses/${courseId}/libraries`)
+}
+
+/** 花名册批量导入（表头：学号 | 角色） */
+function onMemberImportChange(uploadFile: UploadFile): void {
+  const raw = uploadFile.raw
+  if (!raw) return
+  if (raw.name.split('.').pop()?.toLowerCase() !== 'xlsx') {
+    ElMessage.error('请上传 .xlsx 格式的 Excel 文件')
+    memberImportRef.value?.clearFiles()
+    return
+  }
+  void importMembers(raw)
+}
+
+async function importMembers(file: File): Promise<void> {
+  memberImporting.value = true
+  try {
+    const result = await courseApi.importMembers(courseId, file)
+    showMemberImportResult(result)
+    members.value = await courseApi.members(courseId)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    memberImporting.value = false
+    memberImportRef.value?.clearFiles()
+  }
+}
+
+function showMemberImportResult(result: ImportResult): void {
+  const lines = [`成功导入 ${result.succeeded} 人，跳过 ${result.skipped} 人。`]
+  if (result.errors.length) {
+    lines.push('')
+    lines.push(`错误明细（共 ${result.errors.length} 条）：`)
+    for (const err of result.errors) lines.push(`第 ${err.row} 行：${err.message}`)
+  }
+  ElMessageBox.alert(lines.join('\n'), '花名册导入结果', {
+    type: result.errors.length ? 'warning' : 'success',
+    confirmButtonText: '确定',
+  })
+}
+
 onMounted(load)
 </script>
 
@@ -151,6 +288,10 @@ onMounted(load)
               <h1>{{ course.name }}</h1>
               <p>{{ course.description || '暂无课程简介。' }}</p>
               <div class="hero-meta"><span>课程代码 {{ course.courseCode }}</span><span>授课团队 {{ teacherNames || '待添加' }}</span><span>{{ activeStudents.length }} 名学生</span></div>
+              <div class="hero-actions">
+                <el-button v-if="canManage && course.status !== 'ARCHIVED'" size="small" @click="openEditCourse">编辑课程</el-button>
+                <el-button v-if="canInstruct" size="small" @click="goLibraries">比对库管理</el-button>
+              </div>
             </div>
             <div v-if="canManage && course.inviteCode" class="invite-box">
               <small>课程邀请码</small><strong>{{ course.inviteCode }}</strong>
@@ -176,10 +317,12 @@ onMounted(load)
                   <div v-for="item in assignments" :key="item.id" role="button" tabindex="0" class="table-row" @click="router.push(`/assignments/${item.id}`)">
                     <span class="status-dot" :class="item.status.toLowerCase()" />
                     <span class="row-main"><strong>{{ item.title }}</strong><small>截止 {{ format(item.deadlineAt) }} · 权重 {{ item.weight }}%</small></span>
-                    <span class="row-tags"><el-tag size="small" effect="plain" :type="item.status === 'PUBLISHED' ? 'success' : 'info'">{{ item.status === 'PUBLISHED' ? '已发布' : '草稿' }}</el-tag><el-tag v-if="item.status === 'DRAFT' && item.scheduledPublishAt" size="small" effect="plain" type="warning">定时 {{ format(item.scheduledPublishAt) }}</el-tag><span v-if="item.checkEnabled" class="check-tag">查重</span></span>
-                    <div v-if="canInstruct" class="row-actions" @click.stop>
+                    <span class="row-tags"><el-tag size="small" effect="plain" :type="assignmentStatusType(item.status)">{{ assignmentStatusLabel(item.status) }}</el-tag><el-tag v-if="item.status === 'DRAFT' && item.scheduledPublishAt" size="small" effect="plain" type="warning">定时 {{ format(item.scheduledPublishAt) }}</el-tag><span v-if="item.checkEnabled" class="check-tag">查重</span></span>
+                    <div v-if="canInstruct && item.status !== 'ARCHIVED'" class="row-actions" @click.stop>
                       <el-button v-if="item.status === 'DRAFT'" size="small" plain @click="publish(item)">发布</el-button>
                       <el-button size="small" plain @click="openEditAssignment(item)">编辑</el-button>
+                      <el-button v-if="item.status === 'PUBLISHED'" size="small" plain @click="closeAssignment(item)">关闭作业</el-button>
+                      <el-button v-if="['PUBLISHED', 'CLOSED'].includes(item.status)" size="small" plain type="warning" @click="archiveAssignment(item)">归档作业</el-button>
                       <el-button size="small" type="danger" plain @click="removeAssignment(item)">删除</el-button>
                     </div>
                     <span class="arrow">→</span>
@@ -188,19 +331,35 @@ onMounted(load)
                 <div v-else class="empty-line">还没有作业。{{ canInstruct ? '创建第一份作业吧。' : '' }}</div>
               </el-tab-pane>
               <el-tab-pane :label="`花名册 (${members.length})`" name="members">
-                <div class="tab-toolbar"><p>课程教师、助教与学生名单。</p><el-button v-if="canInstruct" @click="memberVisible = true">＋ 添加成员</el-button></div>
+                <div class="tab-toolbar">
+                  <p>课程教师、助教与学生名单。</p>
+                  <div class="tab-actions">
+                    <el-upload ref="memberImportRef" :show-file-list="false" :auto-upload="false" :limit="1" accept=".xlsx" :on-change="onMemberImportChange">
+                      <el-button :loading="memberImporting">批量导入</el-button>
+                    </el-upload>
+                    <el-button v-if="canInstruct" @click="memberVisible = true">＋ 添加成员</el-button>
+                  </div>
+                </div>
                 <el-table :data="members" style="width: 100%">
                   <el-table-column prop="userNo" label="学工号" width="150" />
                   <el-table-column prop="displayName" label="姓名" min-width="140" />
                   <el-table-column label="课程角色" width="130"><template #default="{ row }"><el-tag size="small" effect="plain" :type="row.memberRole === 'INSTRUCTOR' ? 'warning' : row.memberRole === 'ASSISTANT' ? 'success' : 'info'">{{ row.memberRole === 'INSTRUCTOR' ? '授课教师' : row.memberRole === 'ASSISTANT' ? '助教' : '学生' }}</el-tag></template></el-table-column>
                   <el-table-column label="加入时间" width="170"><template #default="{ row }">{{ format(row.joinedAt) }}</template></el-table-column>
+                  <el-table-column label="操作" width="100" fixed="right">
+                    <template #default="{ row }">
+                      <el-button v-if="canInstruct && ['STUDENT', 'ASSISTANT'].includes(row.memberRole) && row.userId !== auth.user?.id"
+                                 link type="danger" @click="removeMember(row)">移除</el-button>
+                    </template>
+                  </el-table-column>
                 </el-table>
               </el-tab-pane>
               <el-tab-pane label="课程设置" name="settings">
                 <div class="settings-list">
                   <div><b>课程状态</b><span>{{ course.status === 'ACTIVE' ? '课程进行中，可创建和提交作业。' : '课程已归档，仅可查看历史数据。' }}</span></div>
+                  <div><b>学期</b><span>{{ course.semester }}</span></div>
                   <div><b>创建时间</b><span>{{ format(course.createdAt) }}</span></div>
                   <div><b>最近更新</b><span>{{ format(course.updatedAt) }}</span></div>
+                  <div><b>评审结果学生可见</b><span>课程层面未配置全局开关，请在作业详情页为每份作业单独配置。</span></div>
                   <div v-if="canManage && course.status === 'ACTIVE'" class="danger-row"><span><b>归档课程</b><small>归档后不能再修改或提交，请谨慎操作。</small></span><el-button type="danger" plain @click="archiveCourse">归档课程</el-button></div>
                 </div>
               </el-tab-pane>
@@ -219,6 +378,15 @@ onMounted(load)
       </el-form>
       <template #footer><el-button @click="memberVisible = false">取消</el-button><el-button type="primary" @click="addMember">添加</el-button></template>
     </el-dialog>
+
+    <el-dialog v-model="courseEditVisible" title="编辑课程" width="min(520px, 92vw)">
+      <el-form label-position="top">
+        <el-form-item label="课程名称"><el-input v-model="courseEditForm.name" placeholder="请输入课程名称" /></el-form-item>
+        <el-form-item label="学期（只读）"><el-input :model-value="course?.semester" disabled /></el-form-item>
+        <el-form-item label="课程简介"><el-input v-model="courseEditForm.description" type="textarea" :rows="4" placeholder="填写课程目标与要求" /></el-form-item>
+      </el-form>
+      <template #footer><el-button @click="courseEditVisible = false">取消</el-button><el-button type="primary" :loading="savingCourse" @click="saveCourse">保存修改</el-button></template>
+    </el-dialog>
   </div>
 </template>
 
@@ -232,6 +400,9 @@ onMounted(load)
 .hero-main h1 { font-size: clamp(29px, 4vw, 42px); letter-spacing: -.04em; margin-bottom: 13px; }
 .hero-main p { color: #b9d8d4; line-height: 1.8; max-width: 650px; margin-bottom: 22px; font-size: 13px; }
 .hero-meta { display: flex; gap: 20px; flex-wrap: wrap; color: #91c3bd; font-size: 11px; }
+.hero-actions { display: flex; gap: 9px; margin-top: 20px; flex-wrap: wrap; }
+.hero-actions :deep(.el-button) { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.2); color: #fff; }
+.hero-actions :deep(.el-button:hover) { background: rgba(255,255,255,.2); }
 .invite-box { position: relative; z-index: 1; background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.14); border-radius: 15px; padding: 16px; min-width: 170px; align-self: center; backdrop-filter: blur(8px); }
 .invite-box small { display: block; color: #a8d8d2; font-size: 10px; margin-bottom: 8px; }
 .invite-box strong { display: block; color: #f4c95d; font-size: 24px; letter-spacing: .12em; font-family: Consolas, monospace; }
@@ -247,12 +418,15 @@ onMounted(load)
 .detail-panel { padding: 10px 24px 24px; }
 .tab-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 7px 0 14px; }
 .tab-toolbar p { margin: 0; color: #7d8997; font-size: 12px; }
+.tab-actions { display: flex; gap: 9px; align-items: center; }
 .assignment-table { border-top: 1px solid #edf1f2; }
 .table-row { width: 100%; display: flex; align-items: center; gap: 12px; border: 0; border-bottom: 1px solid #edf1f2; background: transparent; text-align: left; padding: 15px 4px; cursor: pointer; }
 .table-row:hover { background: #fbfdfc; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #aab4be; flex: 0 0 8px; }
 .status-dot.published { background: #25a582; box-shadow: 0 0 0 3px #dcf5ed; }
 .status-dot.draft { background: #d1a434; }
+.status-dot.closed { background: #b77710; box-shadow: 0 0 0 3px #f4e9d3; }
+.status-dot.archived { background: #aab4be; box-shadow: 0 0 0 3px #e7ecec; }
 .row-main { flex: 1; min-width: 0; }
 .row-main strong, .row-main small { display: block; }
 .row-main strong { font-size: 13px; margin-bottom: 5px; }

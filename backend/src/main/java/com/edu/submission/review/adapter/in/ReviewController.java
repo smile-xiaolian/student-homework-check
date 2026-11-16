@@ -1,5 +1,8 @@
 package com.edu.submission.review.adapter.in;
 
+import com.edu.submission.review.adapter.in.dto.BatchScorePreviewItem;
+import com.edu.submission.review.adapter.in.dto.BatchScoreRequest;
+import com.edu.submission.review.adapter.in.dto.GradeModifyRequest;
 import com.edu.submission.review.adapter.in.dto.GradeView;
 import com.edu.submission.review.adapter.in.dto.ReviewQueueItem;
 import com.edu.submission.review.adapter.in.dto.ReviewSaveRequest;
@@ -63,6 +66,12 @@ public class ReviewController {
         return reviewService.grade(CurrentUser.require(), id);
     }
 
+    @PatchMapping("/submissions/{id}/grade")
+    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
+    public GradeView modifyGrade(@PathVariable UUID id, @Valid @RequestBody GradeModifyRequest request) {
+        return reviewService.modifyGrade(CurrentUser.require(), id, request);
+    }
+
     @GetMapping("/assignments/{id}/grades")
     @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
     public List<GradeView> grades(@PathVariable UUID id) {
@@ -78,5 +87,19 @@ public class ReviewController {
             submissionIds = values.stream().map(value -> UUID.fromString(String.valueOf(value))).toList();
         }
         return reviewService.publish(CurrentUser.require(), id, submissionIds);
+    }
+
+    @PostMapping("/assignments/{id}/grades/batch-score/preview")
+    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
+    public List<BatchScorePreviewItem> batchScorePreview(@PathVariable UUID id,
+                                                         @Valid @RequestBody BatchScoreRequest request) {
+        return reviewService.batchScorePreview(CurrentUser.require(), id, request);
+    }
+
+    @PostMapping("/assignments/{id}/grades/batch-score")
+    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
+    public Map<String, Object> batchScore(@PathVariable UUID id,
+                                          @Valid @RequestBody BatchScoreRequest request) {
+        return reviewService.batchScore(CurrentUser.require(), id, request);
     }
 }

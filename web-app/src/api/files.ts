@@ -13,14 +13,18 @@ export const fileApi = {
     }).then((response) => response.data)
   },
   async download(file: SubmissionFile): Promise<void> {
-    const response = await http.get<Blob>(`/files/${file.id}/content`, {
+    await fileApi.downloadById(file.id, file.originalName)
+  },
+  /** 按文件 ID 下载内容（反馈附件等），filename 用于保存时的文件名 */
+  async downloadById(id: string, filename: string): Promise<void> {
+    const response = await http.get<Blob>(`/files/${id}/content`, {
       responseType: 'blob',
       timeout: 120_000,
     })
     const url = URL.createObjectURL(response.data)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = file.originalName
+    anchor.download = filename
     document.body.appendChild(anchor)
     anchor.click()
     anchor.remove()

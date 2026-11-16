@@ -2,10 +2,12 @@ package com.edu.submission.shared.storage;
 
 import com.edu.submission.shared.api.ApiException;
 import com.edu.submission.shared.config.StorageProperties;
+import java.io.InputStream;
 import java.time.Duration;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
@@ -50,6 +52,22 @@ public class ObjectStorageService {
                     .key(objectKey)
                     .build());
             return response.asByteArray();
+        } catch (S3Exception exception) {
+            throw ApiException.notFound("OBJECT_NOT_FOUND", "文件不存在", "对象可能已被删除或尚未生成。");
+        }
+    }
+
+    /**
+     * 返回对象内容的流式读取（用于 ZIP 打包等需要分块复制的场景，避免整包读入内存）。
+     * 调用方负责关闭返回的 InputStream。
+     */
+    public InputStream getStream(String objectKey) {
+        try {
+            ResponseInputStream<GetObjectResponse> response = s3Client.getObject(GetObjectRequest.builder()
+                    .bucket(properties.bucket())
+                    .key(objectKey)
+                    .build());
+            return response;
         } catch (S3Exception exception) {
             throw ApiException.notFound("OBJECT_NOT_FOUND", "文件不存在", "对象可能已被删除或尚未生成。");
         }

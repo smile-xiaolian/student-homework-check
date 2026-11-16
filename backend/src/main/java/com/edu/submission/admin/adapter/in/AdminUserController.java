@@ -8,9 +8,15 @@ import com.edu.submission.identity.adapter.in.dto.UserAccountView;
 import com.edu.submission.shared.api.PageResult;
 import com.edu.submission.shared.security.CurrentUser;
 import jakarta.validation.Valid;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.UUID;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -19,6 +25,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 @RestController
 @RequestMapping("/api/v1/admin/users")
@@ -79,6 +86,30 @@ public class AdminUserController {
                                               @Valid @RequestBody ResetPasswordRequest request) {
         adminUserService.resetPassword(CurrentUser.require(), id, request.newPassword());
         return ResponseEntity.noContent().build();
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> delete(@PathVariable UUID id) {
+        adminUserService.deleteUser(CurrentUser.require(), id);
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/import")
+    public Map<String, Object> importUsers(@RequestParam("file") MultipartFile file) {
+        return adminUserService.importUsers(CurrentUser.require(), file);
+    }
+
+    @GetMapping("/import-template")
+    public ResponseEntity<byte[]> importTemplate() {
+        byte[] bytes = adminUserService.importTemplate();
+        ContentDisposition disposition = ContentDisposition.attachment()
+                .filename("user-import-template.xlsx", StandardCharsets.UTF_8)
+                .build();
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
+                .body(bytes);
     }
 }
 

@@ -1,6 +1,7 @@
 package com.edu.submission.course.application;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.edu.submission.audit.AuditService;
 import com.edu.submission.course.adapter.in.dto.AddMemberRequest;
 import com.edu.submission.course.adapter.in.dto.CourseCreateRequest;
@@ -20,17 +21,29 @@ import com.edu.submission.shared.api.PageResult;
 import com.edu.submission.shared.api.Pagination;
 import com.edu.submission.shared.ids.Ids;
 import com.edu.submission.shared.security.UserPrincipal;
+import java.io.IOException;
+import java.io.InputStream;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
+import org.apache.poi.ss.usermodel.DataFormatter;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.usermodel.WorkbookFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 
 @Service
 public class CourseService {
@@ -236,9 +249,185 @@ public class CourseService {
                         "花名册更新后未找到该成员。"));
     }
 
-    @Transactional
-    public CourseView rotateInviteCode(UserPrincipal principal, UUID courseId) {
+    /**
+     * 花名册 Excel 导入（FR-C-03）：表头（学号|角色），角色仅 STUDENT/ASSISTANT（INSTRUCTOR 422）；
+     * 按学号查用户（不存在则记错误行并跳过），成员角色须与系统角色一致；重复添加幂等。
+     * 逐行处理，单行失败不影响其它行。
+     */
+    public Map<String, Object> importMembers(UserPrincipal principal, UUID courseId, MultipartFile file) {
         Course course = requireCourse(courseId);
+        requireManage(course, principal);
+        assertNotArchived(course);
+        if (file == null || file.isEmpty()) {
+            throw ApiException.unprocessable("IMPORT_FILE_REQUIRED", "请选择要导入的文件",
+                    "文件内容不能为空。");
+        }
+        int succeeded = 0;
+        int alreadyActive = 0;
+        List<Map<String, Object>> errors = new ArrayList<>();
+        try (InputStream in = file.getInputStream()) {
+            Workbook workbook;
+            try {
+                workbook = WorkbookFactory.create(in);
+            } catch (Exception exception) {
+                throw ApiException.unprocessable("IMPORT_FILE_INVALID", "文件格式不正确",
+                        "请上传有效的 .xlsx 文件。");
+            }
+            try (workbook) {
+                Sheet sheet = workbook.getSheetAt(0);
+                DataFormatter formatter = new DataFormatter();
+                int firstRow = sheet.getFirstRowNum();
+                int lastRow = sheet.getLastRowNum();
+                boolean hasHeader = hasRosterHeader(sheet.getRow(firstRow), formatter);
+                int[] mapping = hasHeader
+                        ? resolveRosterHeader(sheet.getRow(firstRow), formatter)
+                        : new int[]{0, 1};
+                for (int r = firstRow + (hasHeader ? 1 : 0); r <= lastRow; r++) {
+                    Row row = sheet.getRow(r);
+                    if (row == null) {
+                        continue;
+                    }
+                    int rowNum = r + 1;
+                    String userNo = cell(row, mapping[0], formatter);
+                    String memberRole = cell(row, mapping[1], formatter).toUpperCase(Locale.ROOT);
+                    if (userNo.isEmpty() && memberRole.isEmpty()) {
+                        continue;
+                    }
+                    if (userNo.isEmpty()) {
+                        errors.add(Map.of("row", rowNum, "message", "学号不能为空"));
+                        continue;
+                    }
+                    if (memberRole.isEmpty()) {
+                        errors.add(Map.of("row", rowNum, "message", "角色不能为空"));
+                        continue;
+                    }
+                    if (!Set.of("STUDENT", "ASSISTANT").contains(memberRole)) {
+                        throw ApiException.unprocessable("MEMBER_ROLE_INVALID", "成员角色不合法",
+                                "花名册导入仅支持 STUDENT 或 ASSISTANT 角色。");
+                    }
+                    UserAccount user = identityQueryService.findByUserNo(userNo).orElse(null);
+                    if (user == null) {
+                        errors.add(Map.of("row", rowNum, "message", "学号不存在：" + userNo));
+                        continue;
+                    }
+                    if (("STUDENT".equals(memberRole) && user.getRole() != UserRole.STUDENT)
+                            || ("ASSISTANT".equals(memberRole) && user.getRole() != UserRole.ASSISTANT)) {
+                        errors.add(Map.of("row", rowNum, "message", "成员角色与系统角色不一致"));
+                        continue;
+                    }
+                    CourseMember member = findMembership(courseId, user.getId());
+                    if (member != null && "ACTIVE".equals(member.getStatus())) {
+                        alreadyActive++;
+                        continue;
+                    }
+                    if (member == null) {
+                        member = new CourseMember();
+                        member.setId(Ids.newUuidV7());
+                        member.setCourseId(courseId);
+                        member.setUserId(user.getId());
+                        member.setMemberRole(memberRole);
+                        member.setStatus("ACTIVE");
+                        courseMemberMapper.insert(member);
+                    } else {
+                        member.setStatus("ACTIVE");
+                        member.setMemberRole(memberRole);
+                        member.setRemovedAt(null);
+                        member.setJoinedAt(OffsetDateTime.now(ZoneOffset.UTC));
+                        courseMemberMapper.updateById(member);
+                    }
+                    succeeded++;
+                }
+            }
+        } catch (IOException exception) {
+            throw ApiException.unprocessable("IMPORT_FILE_READ_FAILED", "文件读取失败",
+                    "请检查文件后重试。");
+        }
+        auditService.recordUser(principal.id(), "roster.import", "COURSE", courseId, "SUCCESS",
+                Map.of("succeeded", succeeded, "skipped", errors.size() + alreadyActive), null);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("succeeded", succeeded);
+        result.put("skipped", errors.size() + alreadyActive);
+        result.put("errors", errors);
+        return result;
+    }
+
+    private boolean hasRosterHeader(Row row, DataFormatter formatter) {
+        if (row == null) {
+            return false;
+        }
+        String first = cell(row, 0, formatter);
+        return first.contains("学号") || first.equalsIgnoreCase("userNo")
+                || first.equalsIgnoreCase("user_no");
+    }
+
+    private int[] resolveRosterHeader(Row row, DataFormatter formatter) {
+        int userNoIdx = -1;
+        int roleIdx = -1;
+        int last = row.getLastCellNum();
+        for (int c = 0; c < last; c++) {
+            String header = cell(row, c, formatter);
+            if (header.contains("学号")) {
+                userNoIdx = c;
+            } else if (header.contains("角色")) {
+                roleIdx = c;
+            }
+        }
+        if (userNoIdx < 0 || roleIdx < 0) {
+            throw ApiException.unprocessable("IMPORT_HEADER_INVALID", "表头不完整",
+                    "表头至少需要包含：学号、角色。");
+        }
+        return new int[]{userNoIdx, roleIdx};
+    }
+
+    private String cell(Row row, int index, DataFormatter formatter) {
+        if (row == null || index < 0) {
+            return "";
+        }
+        org.apache.poi.ss.usermodel.Cell cell = row.getCell(index);
+        return cell == null ? "" : formatter.formatCellValue(cell).trim();
+    }
+
+    /**
+     * 从花名册移除成员（软删除：status -> REMOVED）。
+     * 规则：仅课程管理者可操作；不能移除自己；INSTRUCTOR 仅创建者本人或 ADMIN 可移除；
+     * 目标必须是该课程当前 ACTIVE 成员。
+     */
+    @Transactional
+    public void removeMember(UserPrincipal principal, UUID courseId, UUID userId) {
+        Course course = requireCourse(courseId);
+        requireManage(course, principal);
+        assertNotArchived(course);
+        if (principal.id().equals(userId)) {
+            throw ApiException.conflict("MEMBER_SELF_REMOVE_FORBIDDEN", "不能移除自己",
+                    "不能将当前账号从课程花名册中移除。");
+        }
+        CourseMember member = findMembership(courseId, userId);
+        if (member == null || !"ACTIVE".equals(member.getStatus())) {
+            throw ApiException.notFound("MEMBER_NOT_FOUND", "成员不存在",
+                    "该用户不是本课程的当前成员。");
+        }
+        if ("INSTRUCTOR".equals(member.getMemberRole())
+                && principal.role() != UserRole.ADMIN
+                && !course.getOwnerId().equals(principal.id())) {
+            throw ApiException.conflict("MEMBER_INSTRUCTOR_NOT_REMOVABLE", "不能移除授课教师",
+                    "只有课程创建者或管理员可以移除授课教师。");
+        }
+        int updated = courseMemberMapper.update(null, new LambdaUpdateWrapper<CourseMember>()
+                .eq(CourseMember::getCourseId, courseId)
+                .eq(CourseMember::getUserId, userId)
+                .eq(CourseMember::getStatus, "ACTIVE")
+                .set(CourseMember::getStatus, "REMOVED")
+                .set(CourseMember::getRemovedAt, OffsetDateTime.now(ZoneOffset.UTC)));
+        if (updated == 0) {
+            throw ApiException.notFound("MEMBER_NOT_FOUND", "成员不存在",
+                    "该用户不是本课程的当前成员。");
+        }
+        auditService.recordUser(principal.id(), "roster.remove", "COURSE", courseId, "SUCCESS",
+                Map.of("targetUserId", userId.toString(), "memberRole", member.getMemberRole()), null);
+    }
+
+    @Transactional
+    public CourseView rotateInviteCode(UserPrincipal principal, UUID courseId) {        Course course = requireCourse(courseId);
         if (principal.role() != UserRole.ADMIN && !course.getOwnerId().equals(principal.id())) {
             throw ApiException.forbidden("COURSE_MANAGE_FORBIDDEN", "无权修改课程",
                     "只有课程负责人或管理员可以重新生成邀请码。");

@@ -92,15 +92,16 @@ public class FileUploadService {
         UUID fileId = Ids.newUuidV7();
         String objectKey = "submissions/" + assignmentId + "/" + principal.id() + "/" + fileId + "." + extension;
         storageService.put(objectKey, content, contentType(file.getContentType(), extension));
+        // FR-S-06：上传后先置 PENDING，由 FileScanScheduler 异步扫描（默认 PASS 很快置 CLEAN）
         jdbcTemplate.update(
                 "INSERT INTO app.file_object (id, bucket, object_key, original_name, mime_type, size_bytes, " +
-                        "sha256, scan_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'CLEAN', ?)",
+                        "sha256, scan_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)",
                 fileId, storageProperties.bucket(), objectKey, originalName,
                 contentType(file.getContentType(), extension), content.length, digest, principal.id());
         auditService.recordUser(principal.id(), "file.upload", "FILE_OBJECT", fileId, "SUCCESS",
                 Map.of("assignmentId", assignmentId, "name", originalName, "size", content.length), null);
         return new FileObjectView(fileId, originalName, contentType(file.getContentType(), extension),
-                content.length, digest, "CLEAN", OffsetDateTime.now());
+                content.length, digest, "PENDING", OffsetDateTime.now());
     }
 
     @Transactional(readOnly = true)
@@ -137,26 +138,43 @@ public class FileUploadService {
                         " WHERE sf.file_object_id = fo.id LIMIT 1) AS submission_course_id, " +
                         "(SELECT a.course_id FROM app.assignment_attachment af " +
                         " JOIN app.assignment a ON a.id = af.assignment_id " +
-                        " WHERE af.file_object_id = fo.id LIMIT 1) AS attachment_course_id " +
+                        " WHERE af.file_object_id = fo.id LIMIT 1) AS attachment_course_id, " +
+                        "(SELECT a.course_id FROM app.grade g " +
+                        " JOIN app.submission s ON s.id = g.submission_id " +
+                        " JOIN app.assignment a ON a.id = s.assignment_id " +
+                        " WHERE g.feedback_file_id = fo.id LIMIT 1) AS feedback_course_id, " +
+                        "(SELECT s.submitter_id FROM app.grade g " +
+                        " JOIN app.submission s ON s.id = g.submission_id " +
+                        " WHERE g.feedback_file_id = fo.id LIMIT 1) AS feedback_submitter_id " +
                         "FROM app.file_object fo WHERE fo.id = ? LIMIT 1",
                 (rs, rowNum) -> new StoredFileRef(
                         rs.getString("object_key"), rs.getString("original_name"), rs.getString("mime_type"),
                         rs.getObject("created_by", UUID.class), rs.getString("scan_status"),
                         rs.getObject("submission_course_id", UUID.class),
-                        rs.getObject("attachment_course_id", UUID.class)),
+                        rs.getObject("attachment_course_id", UUID.class),
+                        rs.getObject("feedback_course_id", UUID.class),
+                        rs.getObject("feedback_submitter_id", UUID.class)),
                 fileId);
         if (rows.isEmpty()) {
             throw ApiException.notFound("FILE_NOT_FOUND", "文件不存在", "文件可能已被删除。");
         }
         StoredFileRef file = rows.get(0);
         if (!principal.id().equals(file.createdBy())) {
-            UUID courseId = file.submissionCourseId() == null
-                    ? file.attachmentCourseId() : file.submissionCourseId();
-            if (courseId == null) {
-                throw ApiException.forbidden("FILE_ACCESS_DENIED", "无权下载文件", "该文件不属于当前账号。");
+            boolean feedbackSubmitter = file.feedbackSubmitterId() != null
+                    && principal.id().equals(file.feedbackSubmitterId());
+            if (feedbackSubmitter) {
+                // 反馈附件：允许该提交的学生下载（须仍为该课程成员）
+                Course course = courseService.requireCourse(file.feedbackCourseId());
+                courseService.requireReadable(course, principal);
+            } else {
+                UUID courseId = file.submissionCourseId() == null
+                        ? file.attachmentCourseId() : file.submissionCourseId();
+                if (courseId == null) {
+                    throw ApiException.forbidden("FILE_ACCESS_DENIED", "无权下载文件", "该文件不属于当前账号。");
+                }
+                Course course = courseService.requireCourse(courseId);
+                courseService.requireManage(course, principal);
             }
-            Course course = courseService.requireCourse(courseId);
-            courseService.requireManage(course, principal);
         }
         if ("INFECTED".equals(file.scanStatus()) || "FAILED".equals(file.scanStatus())) {
             throw ApiException.conflict("FILE_NOT_AVAILABLE", "文件不可下载", "文件未通过安全检查。");
@@ -256,6 +274,7 @@ public class FileUploadService {
 
     private record StoredFileRef(String objectKey, String originalName, String mimeType,
                                  UUID createdBy, String scanStatus, UUID submissionCourseId,
-                                 UUID attachmentCourseId) {
+                                 UUID attachmentCourseId, UUID feedbackCourseId,
+                                 UUID feedbackSubmitterId) {
     }
 }

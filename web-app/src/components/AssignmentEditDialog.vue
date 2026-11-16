@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import axios from 'axios'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { assignmentApi } from '@/api/assignments'
+import { libraryApi } from '@/api/libraries'
 import { errorMessage } from '@/api/http'
-import type { Assignment } from '@/types/api'
+import type { Assignment, CheckConfig, Library, RubricDimension } from '@/types/api'
 
 const props = defineProps<{
   modelValue: boolean
@@ -32,11 +34,33 @@ const textWarning = ref(20)
 const textSevere = ref(50)
 const structWarning = ref(30)
 const structSevere = ref(60)
-const rubricRows = ref([
-  { name: '内容完成度', maxScore: 50 },
-  { name: '质量与规范', maxScore: 30 },
-  { name: '思考与创新', maxScore: 20 },
-])
+
+/** 查重配置：比对库（本班库恒启用 + 白名单库多选）与排除项 */
+const classLibraryChecked = true
+const whitelistLibraries = ref<Library[]>([])
+const selectedWhitelistIds = ref<string[]>([])
+const excludeReferences = ref(true)
+const excludeTemplate = ref(true)
+const checkConfigEtag = ref<string | undefined>(undefined)
+const rubricEtag = ref<string | undefined>(undefined)
+
+interface RubricRow {
+  key: string
+  name: string
+  description: string
+  maxScore: number
+  levels: Array<{ label: string; score: number }>
+}
+
+function defaultRubricRows(): RubricRow[] {
+  return [
+    { key: crypto.randomUUID(), name: '内容完成度', description: '', maxScore: 50, levels: [] },
+    { key: crypto.randomUUID(), name: '质量与规范', description: '', maxScore: 30, levels: [] },
+    { key: crypto.randomUUID(), name: '思考与创新', description: '', maxScore: 20, levels: [] },
+  ]
+}
+
+const rubricRows = ref<RubricRow[]>(defaultRubricRows())
 const rubricTotal = computed(() => rubricRows.value.reduce((sum, row) => sum + (Number(row.maxScore) || 0), 0))
 const fileTypeOptions = ['pdf', 'docx', 'doc', 'txt', 'md', 'java', 'py', 'c', 'cpp', 'h', 'js', 'ts', 'go', 'zip']
 const restrictFileTypes = ref(false)
@@ -52,19 +76,77 @@ const assignmentRules: FormRules = {
 }
 
 function addRubricRow(): void {
-  rubricRows.value.push({ name: '', maxScore: 10 })
+  rubricRows.value.push({ key: crypto.randomUUID(), name: '', description: '', maxScore: 10, levels: [] })
 }
 
 function removeRubricRow(index: number): void {
   if (rubricRows.value.length > 1) rubricRows.value.splice(index, 1)
 }
 
+function addLevel(row: RubricRow): void {
+  if (row.levels.length >= 10) {
+    ElMessage.warning('每个评分维度最多设置 10 个等级')
+    return
+  }
+  row.levels.push({ label: '', score: 0 })
+}
+
+function removeLevel(row: RubricRow, index: number): void {
+  row.levels.splice(index, 1)
+}
+
 function toIso(value: string): string | undefined {
   return value ? new Date(value).toISOString() : undefined
 }
 
-function fillForm(): void {
+function applyCheckConfig(config: CheckConfig): void {
+  checkMode.value = config.mode === 'CODE' ? 'CODE' : 'TEXT'
+  textWarning.value = Number(config.text_thresholds?.warning ?? 20)
+  textSevere.value = Number(config.text_thresholds?.severe ?? 50)
+  structWarning.value = Number(config.struct_thresholds?.warning ?? 30)
+  structSevere.value = Number(config.struct_thresholds?.severe ?? 60)
+  selectedWhitelistIds.value = (config.libraries ?? []).filter((id) => id !== 'CLASS')
+  excludeReferences.value = config.exclude?.references ?? true
+  excludeTemplate.value = config.exclude?.template ?? true
+}
+
+function applyRubric(dimensions: RubricDimension[]): void {
+  rubricRows.value = dimensions.length
+    ? dimensions.map((dim) => ({
+        key: dim.key,
+        name: dim.name ?? '',
+        description: dim.description ?? '',
+        maxScore: dim.maxScore ?? 10,
+        levels: (dim.levels ?? []).map((level) => ({ label: level.label, score: Number(level.score) || 0 })),
+      }))
+    : defaultRubricRows()
+}
+
+function resetCheckConfig(): void {
+  checkMode.value = 'TEXT'
+  textWarning.value = 20
+  textSevere.value = 50
+  structWarning.value = 30
+  structSevere.value = 60
+  selectedWhitelistIds.value = []
+  excludeReferences.value = true
+  excludeTemplate.value = true
+}
+
+/** 拉取课程下的白名单比对库（供多选） */
+async function loadWhitelistLibraries(): Promise<void> {
+  try {
+    const list = await libraryApi.list(props.courseId)
+    whitelistLibraries.value = list.filter((lib) => lib.libraryType === 'WHITELIST')
+  } catch {
+    whitelistLibraries.value = []
+  }
+}
+
+async function fillForm(): Promise<void> {
   const item = props.assignment
+  checkConfigEtag.value = undefined
+  rubricEtag.value = undefined
   if (item) {
     form.title = item.title
     form.description = item.description ?? ''
@@ -75,16 +157,33 @@ function fillForm(): void {
     form.checkEnabled = item.checkEnabled
     form.allowMultiVersion = item.allowMultiVersion
     form.effectiveRule = item.effectiveRule
-    const config = item.checkConfig as Record<string, any> | null
-    checkMode.value = config?.mode === 'CODE' ? 'CODE' : 'TEXT'
-    textWarning.value = Number(config?.text_thresholds?.warning ?? 20)
-    textSevere.value = Number(config?.text_thresholds?.severe ?? 50)
-    structWarning.value = Number(config?.struct_thresholds?.warning ?? 30)
-    structSevere.value = Number(config?.struct_thresholds?.severe ?? 60)
-    const dimensions = item.rubricDefinition?.dimensions ?? []
-    rubricRows.value = dimensions.length
-      ? dimensions.map((dim) => ({ name: dim.name ?? '', maxScore: dim.maxScore ?? 10 }))
-      : [{ name: '内容完成度', maxScore: 50 }, { name: '质量与规范', maxScore: 30 }, { name: '思考与创新', maxScore: 20 }]
+    // 查重配置：优先使用作业详情携带的配置，否则回退到接口拉取（拿到 ETag 用于 If-Match）
+    if (item.checkConfig) {
+      applyCheckConfig(item.checkConfig)
+      checkConfigEtag.value = `"row-${item.rowVersion}"`
+    } else {
+      try {
+        const result = await assignmentApi.checkConfig(item.id)
+        applyCheckConfig(result.data)
+        checkConfigEtag.value = result.etag ?? `"row-${item.rowVersion}"`
+      } catch {
+        resetCheckConfig()
+      }
+    }
+    // 量规：优先使用作业详情携带的量规，否则回退到接口拉取
+    const dims = item.rubricDefinition?.dimensions ?? []
+    if (dims.length) {
+      applyRubric(dims)
+      rubricEtag.value = `"row-${item.rowVersion}"`
+    } else {
+      try {
+        const result = await assignmentApi.rubric(item.id)
+        applyRubric(result.data.dimensions ?? [])
+        rubricEtag.value = result.etag ?? `"row-${item.rowVersion}"`
+      } catch {
+        rubricRows.value = defaultRubricRows()
+      }
+    }
     if (item.allowedFileTypes?.length) {
       restrictFileTypes.value = true
       selectedFileTypes.value = [...item.allowedFileTypes]
@@ -102,16 +201,8 @@ function fillForm(): void {
     form.checkEnabled = true
     form.allowMultiVersion = true
     form.effectiveRule = 'LAST_SUBMISSION'
-    checkMode.value = 'TEXT'
-    textWarning.value = 20
-    textSevere.value = 50
-    structWarning.value = 30
-    structSevere.value = 60
-    rubricRows.value = [
-      { name: '内容完成度', maxScore: 50 },
-      { name: '质量与规范', maxScore: 30 },
-      { name: '思考与创新', maxScore: 20 },
-    ]
+    resetCheckConfig()
+    rubricRows.value = defaultRubricRows()
     restrictFileTypes.value = false
     selectedFileTypes.value = [...fileTypeOptions]
     publishMode.value = 'manual'
@@ -127,6 +218,15 @@ function validate(): string | null {
   if (rubricRows.value.some((row) => !row.name.trim())) return '请为每个评分维度填写名称'
   if (rubricRows.value.some((row) => !(Number(row.maxScore) > 0) || Number(row.maxScore) > 100)) return '评分维度的满分必须为 1-100 之间的数字'
   if (rubricTotal.value <= 0) return '评分量规总分必须大于 0'
+  for (const row of rubricRows.value) {
+    for (const level of row.levels) {
+      if (!level.label.trim()) return `维度「${row.name || '未命名'}」存在未命名的评分等级`
+      const score = Number(level.score)
+      if (!Number.isFinite(score) || score < 0 || score > Number(row.maxScore)) {
+        return `维度「${row.name}」的评分等级「${level.label}」分值必须在 0 到满分 ${row.maxScore} 之间`
+      }
+    }
+  }
   if (restrictFileTypes.value && !selectedFileTypes.value.length) return '限制文件类型时至少选择一种类型'
   if (checkMode.value === 'TEXT') {
     if (textWarning.value < 0 || textSevere.value > 100 || textWarning.value >= textSevere.value) return '文本阈值必须满足 0 ≤ 警告 < 严重 ≤ 100'
@@ -136,10 +236,11 @@ function validate(): string | null {
   return null
 }
 
+/** 基础字段载荷（不含查重配置与量规，二者单独提交） */
 function buildPayload(): Record<string, unknown> {
   const effectiveRule = form.allowMultiVersion ? form.effectiveRule : 'LAST_SUBMISSION'
   if (!form.allowMultiVersion) form.effectiveRule = effectiveRule
-  const payload: Record<string, unknown> = {
+  return {
     title: form.title,
     description: form.description,
     deadlineAt: toIso(form.deadlineAt),
@@ -149,27 +250,33 @@ function buildPayload(): Record<string, unknown> {
     checkEnabled: form.checkEnabled,
     allowMultiVersion: form.allowMultiVersion,
     effectiveRule,
-    checkConfig: form.checkEnabled ? {
-      mode: checkMode.value,
-      text_thresholds: { warning: Number(textWarning.value), severe: Number(textSevere.value) },
-      struct_thresholds: { warning: Number(structWarning.value), severe: Number(structSevere.value) },
-      libraries: ['CLASS'],
-      exclude: { references: true, template: true },
-    } : undefined,
-    rubricDefinition: {
-      totalScore: rubricTotal.value,
-      dimensions: rubricRows.value.map((row, index) => ({
-        key: `dim${index + 1}`,
-        name: row.name.trim(),
-        maxScore: Number(row.maxScore),
-      })),
-    },
     allowedFileTypes: restrictFileTypes.value ? [...selectedFileTypes.value] : undefined,
   }
-  if (!isEdit.value) {
-    payload.scheduledPublishAt = publishMode.value === 'scheduled' ? toIso(scheduledPublishAt.value) : undefined
+}
+
+function buildCheckConfigPayload(): Record<string, unknown> {
+  return {
+    mode: checkMode.value,
+    text_thresholds: { warning: Number(textWarning.value), severe: Number(textSevere.value) },
+    struct_thresholds: { warning: Number(structWarning.value), severe: Number(structSevere.value) },
+    libraries: ['CLASS', ...selectedWhitelistIds.value],
+    exclude: { references: excludeReferences.value, template: excludeTemplate.value },
   }
-  return payload
+}
+
+function buildRubricPayload(): Record<string, unknown> {
+  return {
+    totalScore: rubricTotal.value,
+    dimensions: rubricRows.value.map((row) => ({
+      key: row.key,
+      name: row.name.trim(),
+      description: row.description.trim() || undefined,
+      maxScore: Number(row.maxScore),
+      levels: row.levels.length
+        ? row.levels.map((level) => ({ label: level.label.trim(), score: Number(level.score) }))
+        : undefined,
+    })),
+  }
 }
 
 async function save(): Promise<void> {
@@ -190,6 +297,9 @@ async function save(): Promise<void> {
     }
   }
   const payload = buildPayload()
+  if (!isEdit.value) {
+    payload.scheduledPublishAt = publishMode.value === 'scheduled' ? toIso(scheduledPublishAt.value) : undefined
+  }
   saving.value = true
   try {
     if (isEdit.value && props.assignment) {
@@ -206,11 +316,20 @@ async function save(): Promise<void> {
         }
         payload.confirmImpact = true
       }
+      // 基础字段更新与查重配置/量规更新分离，避免相互覆盖
       const updated = await assignmentApi.update(item.id, payload, `"row-${item.rowVersion}"`)
+      if (form.checkEnabled) {
+        await assignmentApi.updateCheckConfig(item.id, buildCheckConfigPayload(), checkConfigEtag.value)
+      }
+      await assignmentApi.updateRubric(item.id, buildRubricPayload(), rubricEtag.value)
       ElMessage.success('作业配置已更新')
       emit('saved', updated)
     } else {
-      await assignmentApi.create(props.courseId, payload)
+      const created = await assignmentApi.create(props.courseId, payload)
+      if (form.checkEnabled) {
+        await assignmentApi.updateCheckConfig(created.id, buildCheckConfigPayload())
+      }
+      await assignmentApi.updateRubric(created.id, buildRubricPayload())
       ElMessage.success(publishMode.value === 'scheduled'
         ? '作业草稿已创建，到达设定时间后将自动发布'
         : '作业草稿已创建')
@@ -218,19 +337,26 @@ async function save(): Promise<void> {
     }
     emit('update:modelValue', false)
   } catch (error) {
-    ElMessage.error(errorMessage(error))
+    if (axios.isAxiosError(error) && error.response?.status === 412) {
+      ElMessage.error('作业配置已被他人更新，请关闭后重新打开再试')
+    } else {
+      ElMessage.error(errorMessage(error))
+    }
   } finally {
     saving.value = false
   }
 }
 
-watch(() => props.modelValue, (visible) => {
-  if (visible) fillForm()
+watch(() => props.modelValue, async (visible) => {
+  if (visible) {
+    await loadWhitelistLibraries()
+    await fillForm()
+  }
 })
 </script>
 
 <template>
-  <el-dialog :model-value="modelValue" :title="title" width="min(650px, 94vw)" destroy-on-close @update:model-value="emit('update:modelValue', $event)">
+  <el-dialog :model-value="modelValue" :title="title" width="min(680px, 94vw)" destroy-on-close @update:model-value="emit('update:modelValue', $event)">
     <el-form ref="formRef" :model="form" :rules="assignmentRules" label-position="top">
       <el-form-item label="作业标题" prop="title"><el-input v-model="form.title" placeholder="请输入作业标题" /></el-form-item>
       <el-form-item label="作业要求"><el-input v-model="form.description" type="textarea" :rows="4" placeholder="说明任务内容、提交格式与评分要求" /></el-form-item>
@@ -265,14 +391,51 @@ watch(() => props.modelValue, (visible) => {
           <el-form-item v-if="checkMode === 'CODE'" label="代码警告阈值（%）"><el-input-number v-model="structWarning" :min="0" :max="100" style="width: 100%" /></el-form-item>
           <el-form-item v-if="checkMode === 'CODE'" label="代码严重阈值（%）"><el-input-number v-model="structSevere" :min="0" :max="100" style="width: 100%" /></el-form-item>
         </div>
-        <el-form-item label="比对库"><el-checkbox :model-value="true" disabled>本班库（同学互查，默认开启）</el-checkbox></el-form-item>
+        <el-form-item label="比对库">
+          <div class="library-editor">
+            <el-checkbox :model-value="classLibraryChecked" disabled>本班库（同学互查，默认开启）</el-checkbox>
+            <el-checkbox-group v-model="selectedWhitelistIds" class="lib-group">
+              <el-checkbox v-for="lib in whitelistLibraries" :key="lib.id" :value="lib.id" :disabled="!lib.enabled">
+                {{ lib.name }}
+              </el-checkbox>
+            </el-checkbox-group>
+            <p v-if="!whitelistLibraries.length" class="type-hint">暂无白名单库，请先在比对库管理创建。</p>
+          </div>
+        </el-form-item>
+        <el-form-item label="排除项">
+          <div class="exclude-editor">
+            <el-checkbox v-model="excludeReferences">
+              <span>排除引用标注</span>
+              <small>匹配到学生已规范标注的引用内容时不计入相似度。</small>
+            </el-checkbox>
+            <el-checkbox v-model="excludeTemplate">
+              <span>排除模板/公共代码</span>
+              <small>匹配到教师提供的公共模板或脚手架代码时不计入相似度。</small>
+            </el-checkbox>
+          </div>
+        </el-form-item>
       </template>
       <el-form-item label="评分量规">
         <div class="rubric-editor">
-          <div v-for="(row, index) in rubricRows" :key="index" class="rubric-row">
-            <el-input v-model="row.name" placeholder="评分维度名称，如 内容完成度" />
-            <el-input-number v-model="row.maxScore" :min="1" :max="100" :precision="0" controls-position="right" />
-            <el-button link type="danger" :disabled="rubricRows.length <= 1" @click="removeRubricRow(index)">删除</el-button>
+          <div v-for="(row, index) in rubricRows" :key="row.key" class="rubric-card">
+            <div class="rubric-row">
+              <el-input v-model="row.name" placeholder="评分维度名称，如 内容完成度" />
+              <el-input-number v-model="row.maxScore" :min="1" :max="100" :precision="0" controls-position="right" />
+              <el-button link type="danger" :disabled="rubricRows.length <= 1" @click="removeRubricRow(index)">删除</el-button>
+            </div>
+            <el-input v-model="row.description" class="rubric-desc" placeholder="维度描述（可选），说明评分要点" />
+            <div class="levels-block">
+              <div class="levels-head">
+                <span>评分等级</span>
+                <el-button size="small" :disabled="row.levels.length >= 10" @click="addLevel(row)">＋ 添加等级</el-button>
+              </div>
+              <div v-for="(level, li) in row.levels" :key="li" class="level-row">
+                <el-input v-model="level.label" placeholder="等级名称，如 优秀" />
+                <el-input-number v-model="level.score" :min="0" :max="row.maxScore" :precision="0" controls-position="right" />
+                <el-button link type="danger" @click="removeLevel(row, li)">删除</el-button>
+              </div>
+              <p v-if="!row.levels.length" class="muted small">未设置等级时，评审直接按原始分填写。</p>
+            </div>
           </div>
           <div class="rubric-foot">
             <el-button size="small" @click="addRubricRow">＋ 添加维度</el-button>
@@ -317,8 +480,20 @@ watch(() => props.modelValue, (visible) => {
 <style scoped>
 .form-row { display: grid; grid-template-columns: 1.2fr .8fr; gap: 14px; }
 .switch-grid { display: flex; gap: 20px; flex-wrap: wrap; }
-.rubric-editor { width: 100%; display: grid; gap: 8px; }
+.library-editor { width: 100%; display: grid; gap: 8px; }
+.lib-group { display: flex; flex-wrap: wrap; gap: 2px 16px; margin-top: 2px; }
+.exclude-editor { width: 100%; display: grid; gap: 8px; }
+.exclude-editor :deep(.el-checkbox) { align-items: flex-start; height: auto; white-space: normal; }
+.exclude-editor :deep(.el-checkbox__label) { line-height: 1.5; display: grid; gap: 2px; }
+.exclude-editor :deep(.el-checkbox__label small) { color: #97a1ac; font-size: 11px; }
+.rubric-editor { width: 100%; display: grid; gap: 10px; }
+.rubric-card { border: 1px solid #e7eded; border-radius: 10px; padding: 12px 13px; background: #fbfcfc; display: grid; gap: 9px; }
 .rubric-row { display: grid; grid-template-columns: 1fr 130px auto; gap: 8px; align-items: center; }
+.rubric-desc { width: 100%; }
+.levels-block { border-top: 1px dashed #e7eded; padding-top: 9px; display: grid; gap: 7px; }
+.levels-head { display: flex; justify-content: space-between; align-items: center; }
+.levels-head span { font-size: 11px; color: #7d8996; }
+.level-row { display: grid; grid-template-columns: 1fr 130px auto; gap: 8px; align-items: center; }
 .rubric-foot { display: flex; justify-content: space-between; align-items: center; }
 .rubric-foot span { color: #74818e; font-size: 12px; }
 .rubric-foot b { color: #0f766e; font-size: 14px; }
@@ -326,5 +501,7 @@ watch(() => props.modelValue, (visible) => {
 .type-group { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 8px; }
 .type-hint { margin: 8px 0 0; color: #8c97a3; font-size: 11px; line-height: 1.6; }
 .publish-mode { width: 100%; display: grid; gap: 10px; }
-@media (max-width: 640px) { .form-row { grid-template-columns: 1fr; } }
+.muted { color: #97a1ac; }
+.small { font-size: 11px; line-height: 1.7; }
+@media (max-width: 640px) { .form-row { grid-template-columns: 1fr; } .rubric-row, .level-row { grid-template-columns: 1fr; } }
 </style>

@@ -69,6 +69,52 @@ export interface RubricDimension {
   levels?: Array<{ label: string; score: number }>
 }
 
+export interface CheckThresholds {
+  warning?: number
+  severe?: number
+}
+
+export interface CheckExclude {
+  references: boolean
+  template: boolean
+}
+
+export interface CheckConfig {
+  mode: 'TEXT' | 'CODE'
+  text_thresholds: CheckThresholds
+  struct_thresholds: CheckThresholds
+  libraries: string[]
+  exclude: CheckExclude
+}
+
+export interface RubricDefinition {
+  totalScore: number
+  dimensions: RubricDimension[]
+}
+
+export interface BatchScorePreviewItem {
+  submissionId: string
+  submitterName: string
+  checkLevel: string | null
+  before: number | null
+  after: number | null
+}
+
+export interface BatchScorePreview {
+  previews: BatchScorePreviewItem[]
+}
+
+export interface ImportError {
+  row: number
+  message: string
+}
+
+export interface ImportResult {
+  succeeded: number
+  skipped: number
+  errors: ImportError[]
+}
+
 export interface Assignment {
   id: string
   courseId: string
@@ -83,7 +129,7 @@ export interface Assignment {
   allowMultiVersion: boolean
   effectiveRule: 'LAST_SUBMISSION' | 'MANUAL'
   checkEnabled: boolean
-  checkConfig: Record<string, unknown> | null
+  checkConfig: CheckConfig | null
   rubricDefinition: { dimensions?: RubricDimension[]; totalScore?: number }
   allowedFileTypes?: string[]
   scheduledPublishAt?: string | null
@@ -200,6 +246,8 @@ export interface Review {
   annotations: Array<{ id: string; text: string; quote?: string }>
   checkVerdict: string | null
   comment: string | null
+  feedbackFileId?: string | null
+  feedbackFileName?: string | null
   submittedAt: string | null
   updatedAt: string | null
   rowVersion: number
@@ -295,4 +343,54 @@ export interface CheckDistribution {
     overallScore: number
     level: string
   }>
+}
+
+export interface ScoreBand {
+  label: string
+  min: number
+  max: number
+  count: number
+}
+
+export interface ScoreDistribution {
+  bands: ScoreBand[]
+  mean: number | null
+  median: number | null
+  min: number | null
+  max: number | null
+  count: number
+}
+
+export interface Library {
+  id: string
+  courseId: string | null
+  name: string
+  libraryType: string
+  enabled: boolean
+  entryCount: number
+  createdAt: string
+}
+
+export interface LibraryEntry {
+  id: string
+  libraryId: string
+  originalName: string
+  mimeType: string
+  sizeBytes: number
+  sequenceNo: number
+  status: string
+  createdAt: string
+}
+
+export interface AuditLog {
+  id: string
+  action: string
+  actorId: string
+  actorName: string | null
+  targetType: string | null
+  targetId: string | null
+  result: string
+  detail: string | null
+  traceId: string
+  createdAt: string
 }

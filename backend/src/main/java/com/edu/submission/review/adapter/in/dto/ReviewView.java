@@ -19,6 +19,8 @@ public record ReviewView(
         String comment,
         OffsetDateTime submittedAt,
         OffsetDateTime updatedAt,
-        long rowVersion
+        long rowVersion,
+        UUID feedbackFileId,
+        String feedbackFileName
 ) {
 }

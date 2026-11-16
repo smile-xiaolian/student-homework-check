@@ -35,3 +35,7 @@ class StorageClient:
 
     def put(self, object_key: str, content: bytes, content_type: str = "application/octet-stream") -> None:
         self._client.put_object(Bucket=self.bucket, Key=object_key, Body=content, ContentType=content_type)
+
+    def delete(self, object_key: str) -> None:
+        """Delete an object; used to roll back a report object when the DB transaction fails."""
+        self._client.delete_object(Bucket=self.bucket, Key=object_key)

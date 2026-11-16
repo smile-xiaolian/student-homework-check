@@ -16,6 +16,9 @@ public record GradeView(
         String checkVerdict,
         String comment,
         boolean published,
-        OffsetDateTime publishedAt
+        OffsetDateTime publishedAt,
+        long modificationCount,
+        UUID feedbackFileId,
+        String feedbackFileName
 ) {
 }

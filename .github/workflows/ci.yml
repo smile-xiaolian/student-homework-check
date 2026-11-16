@@ -5,7 +5,10 @@ on:
     branches: ["main", "master"]
   pull_request:
 
+# 门禁：后端 mvn 测试（含 JaCoCo 报告）、前端 vue-tsc 类型检查 + 构建、
+# 引擎 56+ 单测全部通过才允许合入 main。
 jobs:
+  # 后端：mvn package 会编译 main 与 test 并运行全部单元测试，失败即阻断合入。
   backend:
     runs-on: ubuntu-latest
     defaults:
@@ -18,8 +21,10 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      # package（或 verify）在 test 阶段执行 JUnit 5 + AssertJ 单测与 JaCoCo 覆盖率报告
       - run: mvn -B package
 
+  # 前端：先跑 vue-tsc 类型检查（与本地验收一致），再 pnpm build，任一失败即阻断合入。
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -38,6 +43,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
+  # 引擎：运行全部 Python 单元测试，失败即阻断合入。
   engine:
     runs-on: ubuntu-latest
     defaults:

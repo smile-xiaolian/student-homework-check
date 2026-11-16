@@ -106,6 +106,13 @@
             <version>${aws-sdk.version}</version>
         </dependency>
 
+        <!-- Excel 批量导入与模板导出：Apache POI，直接支持 DataFormatter 按行流式读取与 SXSSF 流式写出 -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.2.5</version>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

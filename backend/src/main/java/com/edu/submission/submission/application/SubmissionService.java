@@ -15,20 +15,30 @@ import com.edu.submission.shared.api.ApiException;
 import com.edu.submission.shared.crypto.Digests;
 import com.edu.submission.shared.ids.Ids;
 import com.edu.submission.shared.security.UserPrincipal;
+import com.edu.submission.shared.storage.ObjectStorageService;
 import com.edu.submission.submission.adapter.in.dto.SubmissionCreateRequest;
 import com.edu.submission.submission.adapter.in.dto.SubmissionFileView;
 import com.edu.submission.submission.adapter.in.dto.SubmissionView;
 import com.edu.submission.submission.adapter.out.SubmissionMapper;
 import com.edu.submission.submission.domain.Submission;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -43,6 +53,7 @@ public class SubmissionService {
     private final IdentityQueryService identityQueryService;
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
+    private final ObjectStorageService storageService;
 
     public SubmissionService(SubmissionMapper submissionMapper,
                              AssignmentService assignmentService,
@@ -50,7 +61,8 @@ public class SubmissionService {
                              CheckTaskService checkTaskService,
                              IdentityQueryService identityQueryService,
                              AuditService auditService,
-                             JdbcTemplate jdbcTemplate) {
+                             JdbcTemplate jdbcTemplate,
+                             ObjectStorageService storageService) {
         this.submissionMapper = submissionMapper;
         this.assignmentService = assignmentService;
         this.courseService = courseService;
@@ -58,6 +70,7 @@ public class SubmissionService {
         this.identityQueryService = identityQueryService;
         this.auditService = auditService;
         this.jdbcTemplate = jdbcTemplate;
+        this.storageService = storageService;
     }
 
     @Transactional
@@ -72,8 +85,8 @@ public class SubmissionService {
                     "当前账号不是该课程的学生。");
         }
         if (!"PUBLISHED".equals(assignment.getStatus())) {
-            throw ApiException.conflict("ASSIGNMENT_NOT_PUBLISHED", "作业不可提交",
-                    "作业尚未发布或已关闭。");
+            throw ApiException.conflict("ASSIGNMENT_NOT_SUBMITTABLE", "作业不可提交",
+                    "作业尚未发布、已关闭或已归档。");
         }
         if (!"ACTIVE".equals(course.getStatus())) {
             throw ApiException.conflict("COURSE_NOT_ACTIVE", "课程不可提交", "课程已归档或未激活。");
@@ -245,6 +258,125 @@ public class SubmissionService {
         return toView(submission, displayName(submission.getSubmitterId()));
     }
 
+    /**
+     * 批量下载 ZIP 准备（FR-R-06）：校验管理者权限并预取提交元数据与附件引用（不含文件内容与在线文本）。
+     * 在线文本与对象内容在 {@link #writeZip} 流式写出阶段按需读取，避免一次性载入内存。
+     */
+    @Transactional(readOnly = true)
+    public SubmissionsZip prepareZip(UserPrincipal principal, UUID assignmentId, List<UUID> submissionIds) {
+        Assignment assignment = assignmentService.requireAssignment(assignmentId);
+        Course course = courseService.requireCourse(assignment.getCourseId());
+        courseService.requireManage(course, principal);
+        if (submissionIds == null || submissionIds.isEmpty()) {
+            throw ApiException.unprocessable("ZIP_IDS_REQUIRED", "请选择要下载的提交",
+                    "至少选择一个提交。");
+        }
+        if (submissionIds.size() > 50) {
+            throw ApiException.unprocessable("ZIP_TOO_MANY", "批量下载数量过多",
+                    "单次最多下载 50 个提交。");
+        }
+        String placeholders = String.join(",", Collections.nCopies(submissionIds.size(), "?"));
+        List<Object> submissionArgs = new ArrayList<>(submissionIds.size() + 1);
+        submissionArgs.add(assignmentId);
+        submissionArgs.addAll(submissionIds);
+        List<ZipSubmission> submissions = jdbcTemplate.query(
+                "SELECT s.id, s.version_no, u.user_no, u.display_name FROM app.submission s " +
+                        "JOIN app.user_account u ON u.id = s.submitter_id " +
+                        "WHERE s.assignment_id = ? AND s.id IN (" + placeholders + ")",
+                (rs, rowNum) -> new ZipSubmission(
+                        rs.getObject("id", UUID.class), rs.getInt("version_no"),
+                        rs.getString("user_no"), rs.getString("display_name")),
+                submissionArgs.toArray());
+        List<ZipFile> files = jdbcTemplate.query(
+                "SELECT sf.submission_id, fo.object_key, fo.original_name FROM app.submission_file sf " +
+                        "JOIN app.file_object fo ON fo.id = sf.file_object_id " +
+                        "WHERE sf.submission_id IN (" + placeholders + ")",
+                (rs, rowNum) -> new ZipFile(
+                        rs.getObject("submission_id", UUID.class),
+                        rs.getString("object_key"), rs.getString("original_name")),
+                submissionIds.toArray());
+        Map<UUID, List<ZipFile>> bySubmission = new LinkedHashMap<>();
+        for (ZipFile file : files) {
+            bySubmission.computeIfAbsent(file.submissionId(), key -> new ArrayList<>()).add(file);
+        }
+        return new SubmissionsZip(submissions, bySubmission);
+    }
+
+    /**
+     * 流式写 ZIP：对每个提交写 {学号}_{姓名}_v{版本}/online.txt（在线文本非空时），
+     * 附件按 object_key 通过 ObjectStorageService.getStream 分块复制到
+     * {学号}_{姓名}_v{版本}/{originalName}。整体不载入内存，单文件以 8KB 缓冲流式复制。
+     */
+    public void writeZip(SubmissionsZip prep, OutputStream outputStream) throws IOException {
+        try (ZipOutputStream zip = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
+            for (ZipSubmission submission : prep.submissions()) {
+                String folder = zipFolder(submission);
+                String onlineText = jdbcTemplate.query(
+                        "SELECT online_text FROM app.submission WHERE id = ?",
+                        rs -> rs.next() ? rs.getString(1) : null, submission.id());
+                if (onlineText != null && !onlineText.isBlank()) {
+                    zip.putNextEntry(new ZipEntry(folder + "/online.txt"));
+                    zip.write(onlineText.getBytes(StandardCharsets.UTF_8));
+                    zip.closeEntry();
+                }
+                Set<String> used = new HashSet<>();
+                for (ZipFile file : prep.filesBySubmission().getOrDefault(submission.id(), List.of())) {
+                    String name = safeEntryName(file.originalName(), used);
+                    zip.putNextEntry(new ZipEntry(folder + "/" + name));
+                    try (InputStream in = storageService.getStream(file.objectKey())) {
+                        copy(in, zip);
+                    }
+                    zip.closeEntry();
+                }
+            }
+        }
+    }
+
+    private String zipFolder(ZipSubmission submission) {
+        return sanitizePathSegment(submission.userNo()) + "_"
+                + sanitizePathSegment(submission.displayName()) + "_v" + submission.versionNo();
+    }
+
+    /** 清洗路径分隔符与控制字符，保证 ZIP 内路径安全（防目录穿越）。 */
+    private String sanitizePathSegment(String value) {
+        if (value == null || value.isBlank()) {
+            return "unknown";
+        }
+        String normalized = value.replace('\\', '/');
+        int last = normalized.lastIndexOf('/');
+        if (last >= 0) {
+            normalized = normalized.substring(last + 1);
+        }
+        normalized = normalized.replaceAll("[\\r\\n\\t/\\\\:*?\"<>|]", "_");
+        return normalized.isBlank() ? "unknown" : normalized;
+    }
+
+    private String safeEntryName(String originalName, Set<String> used) {
+        String base = sanitizePathSegment(originalName);
+        if (base.isBlank() || "unknown".equals(base)) {
+            base = "file";
+        }
+        String candidate = base;
+        int suffix = 1;
+        while (!used.add(candidate)) {
+            int dot = base.lastIndexOf('.');
+            if (dot > 0) {
+                candidate = base.substring(0, dot) + "_" + (suffix++) + base.substring(dot);
+            } else {
+                candidate = base + "_" + (suffix++);
+            }
+        }
+        return candidate;
+    }
+
+    private void copy(InputStream in, OutputStream out) throws IOException {
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = in.read(buffer)) != -1) {
+            out.write(buffer, 0, read);
+        }
+    }
+
     private SubmissionView toView(Submission submission, String submitterName) {
         CheckTask task = checkTaskService.findLatestForSubmission(submission.getId());
         return SubmissionView.from(submission, submitterName, task, findFiles(submission.getId()));
@@ -357,6 +489,17 @@ public class SubmissionService {
 
     private record PreparedFile(UUID id, String originalName, String sha256, String objectKey,
                                 UUID createdBy, String scanStatus) {
+    }
+
+    /** 批量下载 ZIP 的准备结果：提交元数据 + 按提交分组的附件引用（不含内容）。 */
+    public record SubmissionsZip(List<ZipSubmission> submissions,
+                                 Map<UUID, List<ZipFile>> filesBySubmission) {
+    }
+
+    public record ZipSubmission(UUID id, int versionNo, String userNo, String displayName) {
+    }
+
+    public record ZipFile(UUID submissionId, String objectKey, String originalName) {
     }
 }
 

@@ -120,6 +120,7 @@ public class AssignmentService {
         Course course = courseService.requireCourse(assignment.getCourseId());
         courseService.requireManage(course, principal);
         assertCourseActive(course);
+        assertNotArchived(assignment);
         assertRowVersion(assignment, expectedRowVersion);
         requireImpactConfirmationIfNeeded(assignment, request.confirmImpact());
 
@@ -220,6 +221,52 @@ public class AssignmentService {
         return toView(assignment, true);
     }
 
+    /** 关闭作业：仅 PUBLISHED 可关闭；CLOSED/ARCHIVED 再调为幂等返回。 */
+    @Transactional
+    public AssignmentView close(UserPrincipal principal, UUID assignmentId) {
+        Assignment assignment = requireAssignment(assignmentId);
+        Course course = courseService.requireCourse(assignment.getCourseId());
+        courseService.requireManage(course, principal);
+        assertCourseActive(course);
+        String status = assignment.getStatus();
+        if ("CLOSED".equals(status) || "ARCHIVED".equals(status)) {
+            return toView(assignment, true);
+        }
+        if (!"PUBLISHED".equals(status)) {
+            throw ApiException.conflict("ASSIGNMENT_NOT_CLOSABLE", "作业不可关闭",
+                    "仅已发布的作业可以关闭。");
+        }
+        assignment.setStatus("CLOSED");
+        assignment.setRowVersion((assignment.getRowVersion() == null ? 0L : assignment.getRowVersion()) + 1);
+        assignmentMapper.updateById(assignment);
+        auditService.recordUser(principal.id(), "assignment.close", "ASSIGNMENT", assignmentId,
+                "SUCCESS", Map.of("courseId", assignment.getCourseId().toString()), null);
+        return toView(assignment, true);
+    }
+
+    /** 归档作业：仅 PUBLISHED/CLOSED 可归档；ARCHIVED 再调为幂等返回。 */
+    @Transactional
+    public AssignmentView archive(UserPrincipal principal, UUID assignmentId) {
+        Assignment assignment = requireAssignment(assignmentId);
+        Course course = courseService.requireCourse(assignment.getCourseId());
+        courseService.requireManage(course, principal);
+        assertCourseActive(course);
+        String status = assignment.getStatus();
+        if ("ARCHIVED".equals(status)) {
+            return toView(assignment, true);
+        }
+        if (!"PUBLISHED".equals(status) && !"CLOSED".equals(status)) {
+            throw ApiException.conflict("ASSIGNMENT_NOT_ARCHIVABLE", "作业不可归档",
+                    "仅已发布或已关闭的作业可以归档。");
+        }
+        assignment.setStatus("ARCHIVED");
+        assignment.setRowVersion((assignment.getRowVersion() == null ? 0L : assignment.getRowVersion()) + 1);
+        assignmentMapper.updateById(assignment);
+        auditService.recordUser(principal.id(), "assignment.archive", "ASSIGNMENT", assignmentId,
+                "SUCCESS", Map.of("courseId", assignment.getCourseId().toString()), null);
+        return toView(assignment, true);
+    }
+
     /** 教师端“允许学生查看评审结果”开关：独立于成绩发布流程的作业级可见性控制。 */
     @Transactional
     public AssignmentView putResultsVisibility(UserPrincipal principal, UUID assignmentId, boolean visible) {
@@ -227,6 +274,7 @@ public class AssignmentService {
         Course course = courseService.requireCourse(assignment.getCourseId());
         courseService.requireManage(course, principal);
         assertCourseActive(course);
+        assertNotArchived(assignment);
         assignment.setResultsVisible(visible);
         assignment.setRowVersion((assignment.getRowVersion() == null ? 0L : assignment.getRowVersion()) + 1);
         assignmentMapper.updateById(assignment);
@@ -250,6 +298,7 @@ public class AssignmentService {
         Course course = courseService.requireCourse(assignment.getCourseId());
         courseService.requireManage(course, principal);
         assertCourseActive(course);
+        assertNotArchived(assignment);
         assertRowVersion(assignment, expectedRowVersion);
         JsonNode validated = validateCheckConfig(config);
         assignment.setCheckConfig(writeJson(validated, "{}"));
@@ -275,6 +324,7 @@ public class AssignmentService {
         Course course = courseService.requireCourse(assignment.getCourseId());
         courseService.requireManage(course, principal);
         assertCourseActive(course);
+        assertNotArchived(assignment);
         assertRowVersion(assignment, expectedRowVersion);
         JsonNode validated = validateRubric(rubric);
         assignment.setRubricDefinition(writeJson(validated, "{}"));
@@ -484,6 +534,12 @@ public class AssignmentService {
     private void assertCourseActive(Course course) {
         if (!"ACTIVE".equals(course.getStatus())) {
             throw ApiException.conflict("COURSE_NOT_ACTIVE", "课程不可编辑", "课程已归档或未激活。");
+        }
+    }
+
+    private void assertNotArchived(Assignment assignment) {
+        if ("ARCHIVED".equals(assignment.getStatus())) {
+            throw ApiException.conflict("ASSIGNMENT_ARCHIVED", "作业已归档", "作业已归档，不能修改。");
         }
     }
 

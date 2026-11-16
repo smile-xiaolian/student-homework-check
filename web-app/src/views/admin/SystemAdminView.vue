@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { adminApi } from '@/api/admin'
 import { errorMessage } from '@/api/http'
-import type { SystemConfigItem } from '@/types/api'
+import type { AuditLog, Pagination, SystemConfigItem } from '@/types/api'
 
 const loading = ref(true)
 const saving = ref(false)
 const configs = ref<SystemConfigItem[]>([])
 const monitoring = ref<Record<string, unknown>>({})
-const audits = ref<Array<Record<string, unknown>>>([])
+const audits = ref<AuditLog[]>([])
 const editing = ref<Record<string, string>>({})
 const activeTab = ref('config')
+const auditLoading = ref(false)
+const exporting = ref(false)
+const auditQuery = reactive({ action: '', result: '' })
+const auditPagination = ref<Pagination>({ page: 1, size: 20, total: 0, totalPages: 0, hasNext: false })
 
 const groups = computed(() => {
   const map = new Map<string, SystemConfigItem[]>()
@@ -58,17 +62,61 @@ function parseValue(item: SystemConfigItem): unknown {
 async function load(): Promise<void> {
   loading.value = true
   try {
-    const [configResult, monitoringResult, auditResult] = await Promise.all([
-      adminApi.config(), adminApi.monitoring(), adminApi.audits({ page: 1, size: 20 }),
+    const [configResult, monitoringResult] = await Promise.all([
+      adminApi.config(), adminApi.monitoring(),
     ])
     configs.value = configResult.items
     monitoring.value = monitoringResult
-    audits.value = auditResult.items
     for (const item of configs.value) editing.value[item.key] = displayValue(item)
+    await loadAudits(1)
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
     loading.value = false
+  }
+}
+
+async function loadAudits(page = 1): Promise<void> {
+  auditLoading.value = true
+  try {
+    const result = await adminApi.audits({
+      page, size: auditPagination.value.size,
+      action: auditQuery.action || undefined,
+      result: auditQuery.result || undefined,
+    })
+    audits.value = result.items
+    auditPagination.value = result.pagination
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+function resetAudit(): void {
+  auditPagination.value.page = 1
+  loadAudits(1)
+}
+
+async function exportAudits(): Promise<void> {
+  exporting.value = true
+  try {
+    const blob = await adminApi.auditExport({
+      action: auditQuery.action || undefined,
+      result: auditQuery.result || undefined,
+    })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `audits-${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    exporting.value = false
   }
 }
 
@@ -115,14 +163,31 @@ onMounted(load)
               <div v-else class="empty-line">暂无系统参数</div>
             </el-tab-pane>
             <el-tab-pane label="审计日志" name="audit">
-              <div class="panel-head"><div><h2>审计日志</h2><p>关键管理操作与权限变更均会留下不可修改的记录。</p></div></div>
-              <el-table :data="audits" style="width: 100%">
+              <div class="panel-head">
+                <div><h2>审计日志</h2><p>关键管理操作与权限变更均会留下不可修改的记录。</p></div>
+                <el-button :loading="exporting" @click="exportAudits">导出 CSV</el-button>
+              </div>
+              <div class="audit-filter">
+                <el-input v-model="auditQuery.action" placeholder="操作关键字" clearable style="max-width: 220px" @keyup.enter="resetAudit" @clear="resetAudit" />
+                <el-select v-model="auditQuery.result" placeholder="全部结果" clearable style="width: 130px" @change="resetAudit">
+                  <el-option label="成功" value="SUCCESS" />
+                  <el-option label="失败" value="FAILURE" />
+                </el-select>
+                <el-button @click="resetAudit">查询</el-button>
+                <span class="audit-total">共 {{ auditPagination.total }} 条记录</span>
+              </div>
+              <el-table v-loading="auditLoading" :data="audits" style="width: 100%">
                 <el-table-column prop="action" label="操作" min-width="160" />
-                <el-table-column prop="targetType" label="对象类型" width="130" />
-                <el-table-column prop="result" label="结果" width="100" />
-                <el-table-column prop="traceId" label="追踪号" min-width="190" />
-                <el-table-column prop="createdAt" label="时间" width="175" />
+                <el-table-column prop="actorName" label="操作者" width="130"><template #default="{ row }">{{ row.actorName || row.actorId || '—' }}</template></el-table-column>
+                <el-table-column prop="targetType" label="对象类型" width="110" />
+                <el-table-column prop="targetId" label="对象标识" min-width="150"><template #default="{ row }">{{ row.targetId || '—' }}</template></el-table-column>
+                <el-table-column label="结果" width="90"><template #default="{ row }"><el-tag size="small" effect="plain" :type="row.result === 'SUCCESS' ? 'success' : 'danger'">{{ row.result === 'SUCCESS' ? '成功' : '失败' }}</el-tag></template></el-table-column>
+                <el-table-column prop="traceId" label="追踪号" min-width="170" />
+                <el-table-column prop="createdAt" label="时间" width="165" />
               </el-table>
+              <el-pagination v-if="auditPagination.totalPages > 1" v-model:current-page="auditPagination.page"
+                             :page-size="auditPagination.size" :total="auditPagination.total"
+                             layout="prev, pager, next, total" class="pager" @current-change="loadAudits" />
             </el-tab-pane>
             <el-tab-pane label="运行说明" name="ops">
               <div class="ops-grid">
@@ -156,6 +221,9 @@ onMounted(load)
 .config-row code { display: block; font-size: 11px; color: #17665e; margin-bottom: 3px; }
 .config-row small { display: block; color: #9aa4ae; font-size: 9px; line-height: 1.4; }
 .config-input { max-width: 480px; }
+.audit-filter { display: flex; gap: 9px; align-items: center; padding: 0 0 14px; flex-wrap: wrap; border-bottom: 1px solid #edf1f2; margin-bottom: 6px; }
+.audit-total { margin-left: auto; color: #909ba5; font-size: 10px; }
+.pager { justify-content: center; padding: 16px; }
 .version { color: #a0a9b2; font-family: Consolas, monospace; font-size: 9px; text-align: right; }
 .ops-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding-top: 5px; }
 .ops-grid article { border: 1px solid #e7ecec; background: #fafcfc; border-radius: 12px; padding: 17px; }

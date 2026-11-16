@@ -1,5 +1,5 @@
 import { http } from './http'
-import type { Assignment } from '@/types/api'
+import type { Assignment, CheckConfig, RubricDefinition } from '@/types/api'
 
 export const assignmentApi = {
   get(id: string) {
@@ -16,6 +16,12 @@ export const assignmentApi = {
   publish(id: string) {
     return http.post<Assignment>(`/assignments/${id}/publish`).then((r) => r.data)
   },
+  close(id: string) {
+    return http.post<Assignment>(`/assignments/${id}/close`).then((r) => r.data)
+  },
+  archive(id: string) {
+    return http.post<Assignment>(`/assignments/${id}/archive`).then((r) => r.data)
+  },
   updateResultsVisibility(id: string, visible: boolean) {
     return http.put<Assignment>(`/assignments/${id}/results-visibility`, { visible }).then((r) => r.data)
   },
@@ -23,18 +29,24 @@ export const assignmentApi = {
     return http.delete(`/assignments/${id}`)
   },
   checkConfig(id: string) {
-    return http.get<Record<string, unknown>>(`/assignments/${id}/check-config`).then((r) => r.data)
+    return http.get<CheckConfig>(`/assignments/${id}/check-config`).then((r) => ({
+      data: r.data,
+      etag: r.headers?.etag as string | undefined,
+    }))
   },
   updateCheckConfig(id: string, payload: Record<string, unknown>, etag?: string) {
-    return http.put<Record<string, unknown>>(`/assignments/${id}/check-config`, payload, {
+    return http.put<CheckConfig>(`/assignments/${id}/check-config`, payload, {
       headers: etag ? { 'If-Match': etag } : undefined,
     }).then((r) => r.data)
   },
   rubric(id: string) {
-    return http.get<Record<string, unknown>>(`/assignments/${id}/rubric`).then((r) => r.data)
+    return http.get<RubricDefinition>(`/assignments/${id}/rubric`).then((r) => ({
+      data: r.data,
+      etag: r.headers?.etag as string | undefined,
+    }))
   },
   updateRubric(id: string, payload: Record<string, unknown>, etag?: string) {
-    return http.put<Record<string, unknown>>(`/assignments/${id}/rubric`, payload, {
+    return http.put<RubricDefinition>(`/assignments/${id}/rubric`, payload, {
       headers: etag ? { 'If-Match': etag } : undefined,
     }).then((r) => r.data)
   },

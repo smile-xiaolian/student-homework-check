@@ -3,6 +3,11 @@ package com.edu.submission.review.application;
 import com.edu.submission.audit.AuditService;
 import com.edu.submission.course.application.CourseService;
 import com.edu.submission.course.domain.Course;
+import com.edu.submission.course.domain.CourseMember;
+import com.edu.submission.notification.application.NotificationService;
+import com.edu.submission.review.adapter.in.dto.BatchScorePreviewItem;
+import com.edu.submission.review.adapter.in.dto.BatchScoreRequest;
+import com.edu.submission.review.adapter.in.dto.GradeModifyRequest;
 import com.edu.submission.review.adapter.in.dto.GradeView;
 import com.edu.submission.review.adapter.in.dto.ReviewSaveRequest;
 import com.edu.submission.review.adapter.in.dto.ReviewQueueItem;
@@ -19,8 +24,12 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -31,13 +40,16 @@ public class ReviewService {
 
     private final JdbcTemplate jdbcTemplate;
     private final CourseService courseService;
+    private final NotificationService notificationService;
     private final AuditService auditService;
     private final ObjectMapper objectMapper;
 
     public ReviewService(JdbcTemplate jdbcTemplate, CourseService courseService,
+                         NotificationService notificationService,
                          AuditService auditService, ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
         this.courseService = courseService;
+        this.notificationService = notificationService;
         this.auditService = auditService;
         this.objectMapper = objectMapper;
     }
@@ -52,12 +64,15 @@ public class ReviewService {
         // 学生可见：已发布成绩，或作业开启“评审结果学生可见”后的已提交评审（DRAFT 草稿始终不可见）
         boolean resultsVisible = assignmentResultsVisible(submission.assignmentId());
         List<ReviewView> rows = jdbcTemplate.query(
-                "SELECT id, submission_id, reviewer_id, status, raw_score, late_deduction, final_score, " +
-                        "dimension_scores::text AS dimension_scores, annotations::text AS annotations, " +
-                        "check_verdict, comment, submitted_at, updated_at, row_version " +
-                        "FROM app.grade WHERE submission_id = ? AND (reviewer_id = ? OR status = 'PUBLISHED' " +
-                        "OR (status = 'SUBMITTED' AND ?)) " +
-                        "ORDER BY updated_at DESC LIMIT 1",
+                "SELECT g.id, g.submission_id, g.reviewer_id, g.status, g.raw_score, g.late_deduction, " +
+                        "g.final_score, g.dimension_scores::text AS dimension_scores, " +
+                        "g.annotations::text AS annotations, g.check_verdict, g.comment, " +
+                        "g.submitted_at, g.updated_at, g.row_version, g.feedback_file_id, " +
+                        "fo.original_name AS feedback_file_name " +
+                        "FROM app.grade g LEFT JOIN app.file_object fo ON fo.id = g.feedback_file_id " +
+                        "WHERE g.submission_id = ? AND (g.reviewer_id = ? OR g.status = 'PUBLISHED' " +
+                        "OR (g.status = 'SUBMITTED' AND ?)) " +
+                        "ORDER BY g.updated_at DESC LIMIT 1",
                 (rs, index) -> new ReviewView(
                         rs.getObject("id", UUID.class), rs.getObject("submission_id", UUID.class),
                         rs.getObject("reviewer_id", UUID.class), rs.getString("status"),
@@ -65,14 +80,15 @@ public class ReviewService {
                         rs.getBigDecimal("final_score"), readJson(rs.getString("dimension_scores")),
                         readJson(rs.getString("annotations")), rs.getString("check_verdict"),
                         rs.getString("comment"), rs.getObject("submitted_at", OffsetDateTime.class),
-                        rs.getObject("updated_at", OffsetDateTime.class), rs.getLong("row_version")),
+                        rs.getObject("updated_at", OffsetDateTime.class), rs.getLong("row_version"),
+                        rs.getObject("feedback_file_id", UUID.class), rs.getString("feedback_file_name")),
                 submissionId, principal.id(), resultsVisible);
         if (!rows.isEmpty()) {
             return rows.get(0);
         }
         return new ReviewView(null, submissionId, principal.id(), "NOT_STARTED", null,
                 BigDecimal.ZERO, null, objectMapper.createArrayNode(), objectMapper.createArrayNode(),
-                null, null, null, null, 0L);
+                null, null, null, null, 0L, null, null);
     }
 
     @Transactional(readOnly = true)
@@ -91,7 +107,9 @@ public class ReviewService {
                         "LEFT JOIN app.grade g ON g.submission_id = s.id " +
                         "WHERE s.assignment_id = ? AND s.is_effective = true " +
                         "AND s.status NOT IN ('WITHDRAWN','PENDING_SCAN') " +
-                        "ORDER BY s.is_late DESC, s.submitted_at ASC LIMIT ? OFFSET ?",
+                        // FR-K-09 严重级置顶：r 为 LEFT JOIN check_report，level 可能为 NULL（落入 ELSE 分支）
+                        "ORDER BY CASE WHEN r.level = 'SEVERE' THEN 0 ELSE 1 END, " +
+                        "s.is_late DESC, s.submitted_at ASC LIMIT ? OFFSET ?",
                 (rs, index) -> new ReviewQueueItem(
                         rs.getObject("submission_id", UUID.class), rs.getObject("submitter_id", UUID.class),
                         rs.getString("display_name"), rs.getInt("version_no"),
@@ -109,11 +127,12 @@ public class ReviewService {
 
     @Transactional
     public ReviewView save(UserPrincipal principal, UUID submissionId, ReviewSaveRequest request) {
-        SubmissionRef submission = requireSubmissionManageAccess(principal, submissionId);
+        SubmissionRef submission = requireSubmissionReviewAccess(principal, submissionId);
         if (request.rawScore() == null) {
             throw ApiException.unprocessable("REVIEW_SCORE_REQUIRED", "请填写评审得分", "原始得分不能为空。");
         }
         String verdict = normalizeVerdict(request.checkVerdict());
+        validateFeedbackFile(principal, request.feedbackFileId());
         List<Map<String, Object>> existing = jdbcTemplate.queryForList(
                 "SELECT id, reviewer_id, status, row_version FROM app.grade WHERE submission_id = ?", submissionId);
         JsonNode dimensions = request.dimensionScores() == null
@@ -128,12 +147,13 @@ public class ReviewService {
             UUID gradeId = Ids.newUuidV7();
             jdbcTemplate.update(
                     "INSERT INTO app.grade (id, submission_id, reviewer_id, reviewer_type, status, raw_score, " +
-                            "late_deduction, final_score, dimension_scores, annotations, check_verdict, comment, row_version) " +
-                            "VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, 0)",
+                            "late_deduction, final_score, dimension_scores, annotations, check_verdict, comment, " +
+                            "feedback_file_id, row_version) " +
+                            "VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, 0)",
                     gradeId, submissionId, principal.id(),
                     "ASSISTANT".equals(principal.role().name()) ? "ASSISTANT" : "TEACHER",
                     request.rawScore(), deduction, finalScore, dimensionJson, annotationJson,
-                    verdict, blankToNull(request.comment()));
+                    verdict, blankToNull(request.comment()), request.feedbackFileId());
         } else {
             Map<String, Object> grade = existing.get(0);
             UUID reviewerId = (UUID) grade.get("reviewer_id");
@@ -152,10 +172,11 @@ public class ReviewService {
             jdbcTemplate.update(
                     "UPDATE app.grade SET raw_score = ?, late_deduction = ?, final_score = ?, " +
                             "dimension_scores = ?::jsonb, " +
-                            "annotations = ?::jsonb, check_verdict = ?, comment = ?, row_version = row_version + 1 " +
+                            "annotations = ?::jsonb, check_verdict = ?, comment = ?, feedback_file_id = ?, " +
+                            "row_version = row_version + 1 " +
                             "WHERE submission_id = ? AND row_version = ?",
                     request.rawScore(), deduction, finalScore, dimensionJson, annotationJson, verdict,
-                    blankToNull(request.comment()), submissionId, version);
+                    blankToNull(request.comment()), request.feedbackFileId(), submissionId, version);
         }
         auditService.recordUser(principal.id(), "review.save", "SUBMISSION", submissionId,
                 "SUCCESS", Map.of("rawScore", request.rawScore(), "lateDeduction", deduction), null);
@@ -164,7 +185,7 @@ public class ReviewService {
 
     @Transactional
     public ReviewView submit(UserPrincipal principal, UUID submissionId) {
-        SubmissionRef submission = requireSubmissionManageAccess(principal, submissionId);
+        SubmissionRef submission = requireSubmissionReviewAccess(principal, submissionId);
         int updated = jdbcTemplate.update(
                 "UPDATE app.grade SET status = 'SUBMITTED', submitted_at = now(), row_version = row_version + 1 " +
                         "WHERE submission_id = ? AND reviewer_id = ? AND status = 'DRAFT'",
@@ -190,15 +211,20 @@ public class ReviewService {
         List<GradeView> rows = jdbcTemplate.query(
                 "SELECT g.id, g.submission_id, u.display_name AS submitter_name, s.version_no, g.status, " +
                         "g.raw_score, g.late_deduction, g.final_score, g.check_verdict, g.comment, " +
-                        "g.published, g.published_at " +
+                        "g.published, g.published_at, g.feedback_file_id, fo.original_name AS feedback_file_name, " +
+                        "(SELECT count(*) FROM app.grade_modification gm WHERE gm.submission_id = g.submission_id) AS modification_count " +
                         "FROM app.grade g JOIN app.submission s ON s.id = g.submission_id " +
-                        "JOIN app.user_account u ON u.id = s.submitter_id WHERE g.submission_id = ?",
+                        "JOIN app.user_account u ON u.id = s.submitter_id " +
+                        "LEFT JOIN app.file_object fo ON fo.id = g.feedback_file_id " +
+                        "WHERE g.submission_id = ?",
                 (rs, index) -> new GradeView(
                         rs.getObject("id", UUID.class), rs.getObject("submission_id", UUID.class),
                         rs.getString("submitter_name"), rs.getInt("version_no"), rs.getString("status"),
                         rs.getBigDecimal("raw_score"), rs.getBigDecimal("late_deduction"),
                         rs.getBigDecimal("final_score"), rs.getString("check_verdict"), rs.getString("comment"),
-                        rs.getBoolean("published"), rs.getObject("published_at", OffsetDateTime.class)),
+                        rs.getBoolean("published"), rs.getObject("published_at", OffsetDateTime.class),
+                        rs.getLong("modification_count"), rs.getObject("feedback_file_id", UUID.class),
+                        rs.getString("feedback_file_name")),
                 submissionId);
         if (rows.isEmpty()) {
             throw ApiException.notFound("GRADE_NOT_FOUND", "成绩尚未生成", "评审完成后成绩才会生成。");
@@ -217,20 +243,25 @@ public class ReviewService {
     public List<GradeView> grades(UserPrincipal principal, UUID assignmentId) {
         UUID courseId = assignmentCourse(assignmentId);
         Course course = courseService.requireCourse(courseId);
-        courseService.requireReadable(course, principal);
+        courseService.requireManage(course, principal);
         return jdbcTemplate.query(
                 "SELECT g.id, g.submission_id, u.display_name AS submitter_name, s.version_no, g.status, " +
                         "g.raw_score, g.late_deduction, g.final_score, g.check_verdict, g.comment, " +
-                        "g.published, g.published_at FROM app.grade g " +
+                        "g.published, g.published_at, g.feedback_file_id, fo.original_name AS feedback_file_name, " +
+                        "(SELECT count(*) FROM app.grade_modification gm WHERE gm.submission_id = g.submission_id) AS modification_count " +
+                        "FROM app.grade g " +
                         "JOIN app.submission s ON s.id = g.submission_id " +
                         "JOIN app.user_account u ON u.id = s.submitter_id " +
+                        "LEFT JOIN app.file_object fo ON fo.id = g.feedback_file_id " +
                         "WHERE s.assignment_id = ? AND s.is_effective = true ORDER BY g.final_score DESC",
                 (rs, index) -> new GradeView(
                         rs.getObject("id", UUID.class), rs.getObject("submission_id", UUID.class),
                         rs.getString("submitter_name"), rs.getInt("version_no"), rs.getString("status"),
                         rs.getBigDecimal("raw_score"), rs.getBigDecimal("late_deduction"),
                         rs.getBigDecimal("final_score"), rs.getString("check_verdict"), rs.getString("comment"),
-                        rs.getBoolean("published"), rs.getObject("published_at", OffsetDateTime.class)),
+                        rs.getBoolean("published"), rs.getObject("published_at", OffsetDateTime.class),
+                        rs.getLong("modification_count"), rs.getObject("feedback_file_id", UUID.class),
+                        rs.getString("feedback_file_name")),
                 assignmentId);
     }
 
@@ -238,6 +269,31 @@ public class ReviewService {
     public Map<String, Object> publish(UserPrincipal principal, UUID assignmentId, List<UUID> submissionIds) {
         Course course = courseService.requireCourse(assignmentCourse(assignmentId));
         courseService.requireManage(course, principal);
+        // 先查出本次将被发布（本次新发布）的提交：submissionId -> submitterId，用于发布后通知
+        List<PublishTarget> targets = new java.util.ArrayList<>();
+        if (submissionIds == null || submissionIds.isEmpty()) {
+            targets.addAll(jdbcTemplate.query(
+                    "SELECT s.id AS submission_id, s.submitter_id, a.title, g.final_score " +
+                            "FROM app.grade g JOIN app.submission s ON s.id = g.submission_id " +
+                            "JOIN app.assignment a ON a.id = s.assignment_id " +
+                            "WHERE s.assignment_id = ? AND g.status = 'SUBMITTED'",
+                    (rs, index) -> new PublishTarget(rs.getObject("submission_id", UUID.class),
+                            rs.getObject("submitter_id", UUID.class), rs.getString("title"),
+                            rs.getBigDecimal("final_score")),
+                    assignmentId));
+        } else {
+            for (UUID submissionId : submissionIds) {
+                targets.addAll(jdbcTemplate.query(
+                        "SELECT s.id AS submission_id, s.submitter_id, a.title, g.final_score " +
+                                "FROM app.grade g JOIN app.submission s ON s.id = g.submission_id " +
+                                "JOIN app.assignment a ON a.id = s.assignment_id " +
+                                "WHERE s.id = ? AND s.assignment_id = ? AND g.status = 'SUBMITTED'",
+                        (rs, index) -> new PublishTarget(rs.getObject("submission_id", UUID.class),
+                                rs.getObject("submitter_id", UUID.class), rs.getString("title"),
+                                rs.getBigDecimal("final_score")),
+                        submissionId, assignmentId));
+            }
+        }
         int count;
         if (submissionIds == null || submissionIds.isEmpty()) {
             count = jdbcTemplate.update(
@@ -263,9 +319,282 @@ public class ReviewService {
                         submissionId, assignmentId);
             }
         }
+        // 成绩发布通知：仅通知本次新发布的提交，向提交人推送
+        for (PublishTarget target : targets) {
+            notificationService.notifyUsers(List.of(target.submitterId()), "GRADE_PUBLISHED",
+                    "成绩已发布",
+                    "作业《" + target.title() + "》成绩已发布，最终得分：" + target.finalScore() + " 分。",
+                    "SUBMISSION", target.submissionId());
+        }
         auditService.recordUser(principal.id(), "grade.publish", "ASSIGNMENT", assignmentId,
-                "SUCCESS", Map.of("publishedCount", count), null);
+                "SUCCESS", Map.of("publishedCount", count, "notifiedCount", targets.size()), null);
         return Map.of("assignmentId", assignmentId, "publishedCount", count);
+    }
+
+    /**
+     * 成绩更正：仅 SUBMITTED / PUBLISHED 状态可更正；修改前值写入 grade_modification 留痕；
+     * 若原状态为 PUBLISHED，更正后重新向提交人推送“成绩已更新”通知。
+     */
+    @Transactional
+    public GradeView modifyGrade(UserPrincipal principal, UUID submissionId, GradeModifyRequest request) {
+        SubmissionRef submission = requireSubmissionManageAccess(principal, submissionId);
+        List<Map<String, Object>> gradeRows = jdbcTemplate.queryForList(
+                "SELECT id, status, raw_score, late_deduction, final_score, check_verdict, comment, " +
+                        "feedback_file_id, row_version FROM app.grade WHERE submission_id = ?", submissionId);
+        if (gradeRows.isEmpty()) {
+            throw ApiException.notFound("GRADE_NOT_FOUND", "成绩尚未生成", "评审完成后成绩才会生成。");
+        }
+        Map<String, Object> grade = gradeRows.get(0);
+        String status = (String) grade.get("status");
+        if (!List.of("SUBMITTED", "PUBLISHED").contains(status)) {
+            throw ApiException.conflict("GRADE_NOT_MODIFIABLE", "成绩不可更正",
+                    "仅已提交或已发布的成绩可以更正。");
+        }
+        if (request.rawScore() == null) {
+            throw ApiException.unprocessable("GRADE_MODIFY_SCORE_REQUIRED", "请填写更正后的得分",
+                    "更正后的原始得分不能为空。");
+        }
+        if (request.rawScore().compareTo(BigDecimal.ZERO) < 0
+                || request.rawScore().compareTo(new BigDecimal("100")) > 0) {
+            throw ApiException.unprocessable("GRADE_MODIFY_SCORE_INVALID", "得分不合法",
+                    "得分必须在 0-100 之间。");
+        }
+        String reason = request.reason() == null ? null : request.reason().trim();
+        if (reason == null || reason.length() < 8) {
+            throw ApiException.unprocessable("GRADE_MODIFY_REASON_REQUIRED", "请填写更正原因",
+                    "更正原因不能少于 8 个字符。");
+        }
+        String verdict = normalizeVerdict(request.checkVerdict());
+        validateFeedbackFile(principal, request.feedbackFileId());
+        long version = ((Number) grade.get("row_version")).longValue();
+        if (request.expectedRowVersion() != null && request.expectedRowVersion() != version) {
+            throw ApiException.conflict("GRADE_VERSION_CONFLICT", "成绩已被更新",
+                    "请刷新后重试。");
+        }
+        BigDecimal deduction = lateDeduction(submissionId, request.rawScore());
+        BigDecimal finalScore = request.rawScore().subtract(deduction).max(BigDecimal.ZERO);
+        UUID gradeId = (UUID) grade.get("id");
+        String beforeComment = (String) grade.get("comment");
+        String afterComment = blankToNull(request.comment());
+        jdbcTemplate.update(
+                "INSERT INTO app.grade_modification (id, grade_id, submission_id, assignment_id, modified_by, " +
+                        "before_raw_score, before_final_score, after_raw_score, after_final_score, " +
+                        "before_check_verdict, after_check_verdict, before_comment, after_comment, reason) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                Ids.newUuidV7(), gradeId, submissionId, submission.assignmentId(), principal.id(),
+                grade.get("raw_score"), grade.get("final_score"), request.rawScore(), finalScore,
+                grade.get("check_verdict"), verdict, beforeComment, afterComment, reason);
+        jdbcTemplate.update(
+                "UPDATE app.grade SET raw_score = ?, late_deduction = ?, final_score = ?, " +
+                        "check_verdict = ?, comment = ?, feedback_file_id = ?, row_version = row_version + 1 " +
+                        "WHERE submission_id = ? AND row_version = ?",
+                request.rawScore(), deduction, finalScore, verdict, afterComment,
+                request.feedbackFileId(), submissionId, version);
+        if ("PUBLISHED".equals(status)) {
+            String title = assignmentTitle(submission.assignmentId());
+            notificationService.notifyUsers(List.of(submission.submitterId()), "GRADE_PUBLISHED",
+                    "成绩已更新",
+                    "作业《" + title + "》成绩已更新，最终得分：" + finalScore + " 分。",
+                    "SUBMISSION", submissionId);
+        }
+        auditService.recordUser(principal.id(), "grade.modify", "SUBMISSION", submissionId, "SUCCESS",
+                Map.of("reason", reason,
+                        "beforeRaw", grade.get("raw_score"), "afterRaw", request.rawScore(),
+                        "beforeFinal", grade.get("final_score"), "afterFinal", finalScore,
+                        "wasPublished", "PUBLISHED".equals(status)), null);
+        return grade(principal, submissionId);
+    }
+
+    /**
+     * 批量打分预览（FR-R-06）：计算每个提交的目标分值，不落库。
+     * ALL_MAX = 量规总分（无则 100）；BY_CHECK_LEVEL = PASS 90 / WARNING 75 / SEVERE 60；
+     * FIXED = fixedScore。
+     */
+    @Transactional(readOnly = true)
+    public List<BatchScorePreviewItem> batchScorePreview(UserPrincipal principal, UUID assignmentId,
+                                                         BatchScoreRequest request) {
+        courseService.requireManage(courseService.requireCourse(assignmentCourse(assignmentId)), principal);
+        return prepareBatchItems(assignmentId, request).stream()
+                .map(item -> new BatchScorePreviewItem(item.submissionId(), item.submitterName(),
+                        item.checkLevel(), item.before(), item.after()))
+                .toList();
+    }
+
+    /**
+     * 批量打分执行（FR-R-06）：仅 status IN ('SUBMITTED','PUBLISHED') 的成绩可改；
+     * 每次修改前值写入 grade_modification（reason）；返回 {affected, updated, previews}。
+     */
+    @Transactional
+    public Map<String, Object> batchScore(UserPrincipal principal, UUID assignmentId,
+                                          BatchScoreRequest request) {
+        courseService.requireManage(courseService.requireCourse(assignmentCourse(assignmentId)), principal);
+        List<PreparedBatchItem> prepared = prepareBatchItems(assignmentId, request);
+        String reason = request.reason().trim();
+        int affected = 0;
+        int updated = 0;
+        List<BatchScorePreviewItem> previews = new ArrayList<>(prepared.size());
+        for (PreparedBatchItem item : prepared) {
+            previews.add(new BatchScorePreviewItem(item.submissionId(), item.submitterName(),
+                    item.checkLevel(), item.before(), item.after()));
+            List<Map<String, Object>> grades = jdbcTemplate.queryForList(
+                    "SELECT id, status, raw_score, late_deduction, final_score, row_version " +
+                            "FROM app.grade WHERE submission_id = ?", item.submissionId());
+            if (grades.isEmpty()) {
+                continue;
+            }
+            Map<String, Object> grade = grades.get(0);
+            String status = (String) grade.get("status");
+            if (!List.of("SUBMITTED", "PUBLISHED").contains(status)) {
+                continue;
+            }
+            affected++;
+            BigDecimal deduction = lateDeduction(item.submissionId(), item.after());
+            BigDecimal finalScore = item.after().subtract(deduction).max(BigDecimal.ZERO);
+            int changed = jdbcTemplate.update(
+                    "UPDATE app.grade SET raw_score = ?, late_deduction = ?, final_score = ?, " +
+                            "row_version = row_version + 1 " +
+                            "WHERE submission_id = ? AND status IN ('SUBMITTED','PUBLISHED')",
+                    item.after(), deduction, finalScore, item.submissionId());
+            if (changed > 0) {
+                updated++;
+                jdbcTemplate.update(
+                        "INSERT INTO app.grade_modification (id, grade_id, submission_id, assignment_id, " +
+                                "modified_by, before_raw_score, before_final_score, after_raw_score, " +
+                                "after_final_score, before_check_verdict, after_check_verdict, " +
+                                "before_comment, after_comment, reason) " +
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
+                        Ids.newUuidV7(), grade.get("id"), item.submissionId(), assignmentId, principal.id(),
+                        grade.get("raw_score"), grade.get("final_score"), item.after(), finalScore, reason);
+            }
+        }
+        auditService.recordUser(principal.id(), "grade.batch_score", "ASSIGNMENT", assignmentId,
+                "SUCCESS", Map.of("affected", affected, "updated", updated,
+                        "previewed", previews.size(), "rule", request.rule()), null);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("affected", affected);
+        result.put("updated", updated);
+        result.put("previews", previews);
+        return result;
+    }
+
+    /** 校验批量打分请求并计算每个提交的目标分值（不落库）。 */
+    private List<PreparedBatchItem> prepareBatchItems(UUID assignmentId, BatchScoreRequest request) {
+        List<UUID> ids = request.submissionIds();
+        if (ids == null || ids.isEmpty()) {
+            throw ApiException.unprocessable("BATCH_SUBMISSIONS_REQUIRED", "请选择要打分的提交",
+                    "至少选择一个提交。");
+        }
+        if (ids.size() > 200) {
+            throw ApiException.unprocessable("BATCH_TOO_MANY", "批量打分数量过多",
+                    "单次最多对 200 个提交打分。");
+        }
+        String rule = request.rule();
+        if (rule == null || !Set.of("ALL_MAX", "BY_CHECK_LEVEL", "FIXED").contains(rule)) {
+            throw ApiException.unprocessable("BATCH_RULE_INVALID", "打分规则不合法",
+                    "请选择系统提供的打分规则。");
+        }
+        BigDecimal fixedScore = request.fixedScore();
+        if ("FIXED".equals(rule)) {
+            if (fixedScore == null) {
+                throw ApiException.unprocessable("BATCH_FIXED_SCORE_REQUIRED", "请填写固定分值",
+                        "固定分值不能为空。");
+            }
+            if (fixedScore.compareTo(BigDecimal.ZERO) < 0
+                    || fixedScore.compareTo(new BigDecimal("100")) > 0) {
+                throw ApiException.unprocessable("BATCH_FIXED_SCORE_INVALID", "固定分值不合法",
+                        "固定分值必须在 0-100 之间。");
+            }
+        }
+        String reason = request.reason() == null ? null : request.reason().trim();
+        if (reason == null || reason.length() < 8) {
+            throw ApiException.unprocessable("BATCH_REASON_REQUIRED", "请填写打分原因",
+                    "打分原因不能少于 8 个字符。");
+        }
+        BigDecimal allMax = allMaxScore(assignmentId);
+        String placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
+        List<Object> arguments = new ArrayList<>(ids.size() + 1);
+        arguments.add(assignmentId);
+        arguments.addAll(ids);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "SELECT s.id AS submission_id, u.display_name AS submitter_name, " +
+                        "r.level AS check_level, g.final_score AS before_score " +
+                        "FROM app.submission s JOIN app.user_account u ON u.id = s.submitter_id " +
+                        "LEFT JOIN app.check_report r ON r.submission_id = s.id AND r.is_current = true " +
+                        "LEFT JOIN app.grade g ON g.submission_id = s.id " +
+                        "WHERE s.assignment_id = ? AND s.id IN (" + placeholders + ")",
+                arguments.toArray());
+        Map<UUID, Map<String, Object>> byId = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            byId.put((UUID) row.get("submission_id"), row);
+        }
+        List<PreparedBatchItem> items = new ArrayList<>(ids.size());
+        for (UUID id : ids) {
+            Map<String, Object> row = byId.get(id);
+            if (row == null) {
+                continue;
+            }
+            String submitterName = (String) row.get("submitter_name");
+            String checkLevel = (String) row.get("check_level");
+            BigDecimal before = (BigDecimal) row.get("before_score");
+            BigDecimal after = computeAfter(rule, fixedScore, allMax, checkLevel);
+            items.add(new PreparedBatchItem(id, submitterName, checkLevel, before, after));
+        }
+        return items;
+    }
+
+    private BigDecimal computeAfter(String rule, BigDecimal fixedScore, BigDecimal allMax,
+                                    String checkLevel) {
+        return switch (rule) {
+            case "ALL_MAX" -> allMax;
+            case "BY_CHECK_LEVEL" -> switch (checkLevel == null ? "UNKNOWN" : checkLevel) {
+                case "PASS" -> new BigDecimal("90");
+                case "SEVERE" -> new BigDecimal("60");
+                // WARNING / UNKNOWN / 无报告（NULL）默认取 75
+                default -> new BigDecimal("75");
+            };
+            case "FIXED" -> fixedScore;
+            default -> throw new IllegalStateException("unreachable rule: " + rule);
+        };
+    }
+
+    /** ALL_MAX 目标分：量规总分（rubric.totalScore），未配置量规则 100。 */
+    private BigDecimal allMaxScore(UUID assignmentId) {
+        String rubric = jdbcTemplate.query(
+                "SELECT rubric_definition::text FROM app.assignment WHERE id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, assignmentId);
+        if (rubric != null && !rubric.isBlank()) {
+            try {
+                JsonNode node = objectMapper.readTree(rubric);
+                double total = node.path("totalScore").asDouble(0);
+                if (total > 0) {
+                    return BigDecimal.valueOf(total).setScale(2, RoundingMode.HALF_UP);
+                }
+            } catch (Exception exception) {
+                // 量规解析失败则回退 100
+            }
+        }
+        return new BigDecimal("100");
+    }
+
+    private String assignmentTitle(UUID assignmentId) {
+        List<String> titles = jdbcTemplate.query(
+                "SELECT title FROM app.assignment WHERE id = ?",
+                (rs, index) -> rs.getString("title"), assignmentId);
+        return titles.isEmpty() ? "作业" : titles.get(0);
+    }
+
+    /** 反馈附件校验：若指定 feedbackFileId，要求该 file_object 存在且属于当前评审人。 */
+    private void validateFeedbackFile(UserPrincipal principal, UUID feedbackFileId) {
+        if (feedbackFileId == null) {
+            return;
+        }
+        List<UUID> owners = jdbcTemplate.query(
+                "SELECT created_by FROM app.file_object WHERE id = ?",
+                (rs, index) -> rs.getObject("created_by", UUID.class), feedbackFileId);
+        if (owners.isEmpty() || !principal.id().equals(owners.get(0))) {
+            throw ApiException.unprocessable("FEEDBACK_FILE_INVALID", "反馈附件无效",
+                    "反馈附件不存在或不属于当前账号。");
+        }
     }
 
     private SubmissionRef requireSubmissionReadable(UserPrincipal principal, UUID submissionId) {
@@ -279,6 +608,25 @@ public class ReviewService {
         SubmissionRef submission = submissionRef(submissionId);
         Course course = courseService.requireCourse(submission.courseId());
         courseService.requireManage(course, principal);
+        return submission;
+    }
+
+    /**
+     * 评审起草/提交访问控制：允许 ADMIN、课程 owner、INSTRUCTOR 成员，
+     * 以及该课程 member_role='ASSISTANT' 且 status='ACTIVE' 的成员（助教可评审，不可发布成绩）。
+     */
+    private SubmissionRef requireSubmissionReviewAccess(UserPrincipal principal, UUID submissionId) {
+        SubmissionRef submission = submissionRef(submissionId);
+        Course course = courseService.requireCourse(submission.courseId());
+        if (principal.role().name().equals("ADMIN") || course.getOwnerId().equals(principal.id())) {
+            return submission;
+        }
+        CourseMember member = courseService.findMembership(course.getId(), principal.id());
+        if (member == null || !"ACTIVE".equals(member.getStatus())
+                || (!"INSTRUCTOR".equals(member.getMemberRole()) && !"ASSISTANT".equals(member.getMemberRole()))) {
+            throw ApiException.forbidden("COURSE_MANAGE_FORBIDDEN", "无权管理课程",
+                    "只有课程负责人、授课教师或助教可以执行此操作。");
+        }
         return submission;
     }
 
@@ -385,5 +733,12 @@ public class ReviewService {
     }
 
     private record LateInfo(boolean late, OffsetDateTime submittedAt, OffsetDateTime deadline) {
+    }
+
+    private record PublishTarget(UUID submissionId, UUID submitterId, String title, BigDecimal finalScore) {
+    }
+
+    private record PreparedBatchItem(UUID submissionId, String submitterName, String checkLevel,
+                                     BigDecimal before, BigDecimal after) {
     }
 }

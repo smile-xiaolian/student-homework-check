@@ -8,6 +8,9 @@ import com.edu.submission.shared.security.CurrentUser;
 import jakarta.validation.Valid;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -51,5 +54,19 @@ public class AdminSystemController {
             @RequestParam(required = false) String actorId,
             @RequestParam(required = false) String result) {
         return adminSystemService.audits(page, size, action, actorId, result);
+    }
+
+    @GetMapping(value = "/audits/export", produces = "text/csv;charset=UTF-8")
+    public ResponseEntity<String> exportAudits(
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size,
+            @RequestParam(required = false) String action,
+            @RequestParam(required = false) String actorId,
+            @RequestParam(required = false) String result) {
+        String csv = adminSystemService.exportAuditsCsv(page, size, action, actorId, result);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"audit-log.csv\"")
+                .contentType(MediaType.parseMediaType("text/csv;charset=UTF-8"))
+                .body(csv);
     }
 }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import difflib
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
 from .text import cosine_similarity, jaccard
@@ -35,6 +35,11 @@ class CodeComparison:
     source_path: str
     similarity: float
     matched_excerpt: str
+    # Change 4 (R11): the raw whole-file and function-level scores plus the
+    # per-function matches that feed the 0.4/0.6 weighted structure score.
+    whole_score: float = 0.0
+    function_score: float = 0.0
+    function_matches: list[dict[str, object]] = field(default_factory=list)
 
 
 def detect_language(path: str) -> str:
@@ -157,8 +162,25 @@ def extract_functions(source: str, language: str | None = None) -> dict[str, str
     return functions
 
 
+def _function_start_line(source: str, function_name: str) -> int:
+    """Return the 1-based line where ``function_name`` starts in ``source``."""
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        if function_name in line:
+            return line_number
+    return 0
+
+
 def compare_code(candidate_path: str, candidate_source: str,
                  sources: Iterable[tuple[int, str, str, str]]) -> list[CodeComparison]:
+    """Compare a candidate file against source files at function level (R11).
+
+    Each returned :class:`CodeComparison` carries the raw ``whole_score``
+    (whole-file structural similarity), the best ``function_score`` and the
+    ``function_matches`` list (``functionName`` / ``startLine`` / ``similarity``
+    for every candidate function that matched a source function at >= 0.50).
+    ``similarity`` keeps the historical blend ``max(whole, function * 0.95)`` so
+    existing callers see no change.
+    """
     language = detect_language(candidate_path)
     candidate_functions = extract_functions(candidate_source, language)
     comparisons: list[CodeComparison] = []
@@ -166,14 +188,29 @@ def compare_code(candidate_path: str, candidate_source: str,
         source_language = detect_language(source_path)
         function_score = 0.0
         excerpt = ""
+        function_matches: list[dict[str, object]] = []
         source_functions = extract_functions(source_text, source_language)
         for candidate_name, candidate_body in candidate_functions.items():
-            for _, source_body in source_functions.items():
+            real_name = candidate_name.split(":", 1)[-1]
+            best_score = 0.0
+            for source_body in source_functions.values():
                 score = structure_similarity(candidate_body, source_body, language)
-                if score > function_score:
-                    function_score = score
-                    excerpt = candidate_name
+                if score > best_score:
+                    best_score = score
+            if best_score > function_score:
+                function_score = best_score
+                excerpt = candidate_name
+            if best_score >= 0.50:
+                function_matches.append({
+                    "functionName": real_name,
+                    "startLine": _function_start_line(candidate_source, real_name),
+                    "similarity": round(best_score, 4),
+                })
         whole_score = structure_similarity(candidate_source, source_text, language)
         combined = max(whole_score, function_score * 0.95)
-        comparisons.append(CodeComparison(source_index, source_path, combined, excerpt or source_path))
+        comparisons.append(CodeComparison(
+            source_index, source_path, combined, excerpt or source_path,
+            whole_score=whole_score, function_score=function_score,
+            function_matches=function_matches,
+        ))
     return sorted(comparisons, key=lambda item: item.similarity, reverse=True)

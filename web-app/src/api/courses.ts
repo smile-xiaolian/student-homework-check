@@ -1,5 +1,5 @@
 import { http } from './http'
-import type { Assignment, Course, CourseMember, PageResult } from '@/types/api'
+import type { Assignment, Course, CourseMember, ImportResult, PageResult } from '@/types/api'
 
 export const courseApi = {
   list(page = 1, size = 100) {
@@ -30,10 +30,19 @@ export const courseApi = {
   addMember(id: string, payload: { userNo: string; memberRole: string }) {
     return http.post<CourseMember>(`/courses/${id}/members`, payload).then((r) => r.data)
   },
+  removeMember(id: string, userId: string) {
+    return http.delete(`/courses/${id}/members/${userId}`).then((r) => r.data)
+  },
   rotateInviteCode(id: string) {
     return http.post<Course>(`/courses/${id}/invite-code/rotate`).then((r) => r.data)
   },
   assignments(courseId: string) {
     return http.get<Assignment[]>(`/courses/${courseId}/assignments`).then((r) => r.data)
+  },
+  /** Excel 批量导入花名册（表头：学号 | 角色） */
+  importMembers(id: string, file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return http.post<ImportResult>(`/courses/${id}/members/import`, form, { timeout: 120_000 }).then((r) => r.data)
   },
 }

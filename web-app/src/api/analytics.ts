@@ -1,5 +1,5 @@
 import { http } from './http'
-import type { CheckDistribution, SubmissionProgress } from '@/types/api'
+import type { CheckDistribution, ScoreDistribution, SubmissionProgress } from '@/types/api'
 
 export const analyticsApi = {
   submissionProgress(assignmentId: string) {
@@ -7,6 +7,9 @@ export const analyticsApi = {
   },
   checkDistribution(assignmentId: string) {
     return http.get<CheckDistribution>(`/analytics/assignments/${assignmentId}/check-distribution`).then((r) => r.data)
+  },
+  scoreDistribution(assignmentId: string) {
+    return http.get<ScoreDistribution>(`/analytics/assignments/${assignmentId}/score-distribution`).then((r) => r.data)
   },
   courseScores(courseId: string) {
     return http.get(`/analytics/courses/${courseId}/total-scores`).then((r) => r.data)

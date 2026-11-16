@@ -30,12 +30,15 @@ def process_task(repository: TaskRepository, claimed: dict[str, Any]) -> None:
     logger.info("processing task=%s submission=%s attempt=%s", task.task_id, task.submission_id,
                 claimed.get("attempt"))
     config = CheckConfig.from_snapshot(task.config)
-    candidate_text, candidate_files = _load_candidate(repository, task)
+    candidate_text, candidate_files, raw_files = _load_candidate(repository, task)
     if not candidate_text.strip() and not candidate_files:
         raise ValueError("submission contains no readable text or supported source-code files")
     repository.heartbeat(task.task_id, "COMPARING")
-    source_documents = _load_sources(repository, task, config.max_sources)
+    source_documents, library_status = _load_sources(
+        repository, task, config.max_sources, candidate_text, candidate_files
+    )
     repository.heartbeat(task.task_id, "REPORTING")
+    exclusions = repository.load_exclusions(task)
     report = build_report(
         assignment_id=str(task.assignment_id),
         submission_id=str(task.submission_id),
@@ -43,29 +46,42 @@ def process_task(repository: TaskRepository, claimed: dict[str, Any]) -> None:
         candidate_files=candidate_files,
         sources=source_documents,
         config=config,
+        exclusions=exclusions,
+        library_status=library_status,
     )
     report_json = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     digest_input = candidate_text if candidate_text else "\n".join(
         f"{path}:{content}" for path, content in sorted(candidate_files.items())
     )
     input_digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()
-    report_id = repository.save_report(task, report, report_json, input_digest)
+    report_id = repository.save_report(task, report, report_json, input_digest, files=raw_files)
     logger.info("completed task=%s report=%s score=%s level=%s", task.task_id, report_id,
                 report["overallScore"], report["level"])
 
 
-def _load_candidate(repository: TaskRepository, task: TaskData) -> tuple[str, dict[str, str]]:
+def _load_candidate(repository: TaskRepository, task: TaskData) -> tuple[str, dict[str, str], dict[str, bytes]]:
     text = task.online_text or ""
     files = repository.load_submission_files(task.submission_id)
     file_text, code_files = split_candidate_files(files)
     if file_text:
         text = f"{text}\n\n{file_text}" if text.strip() else file_text
-    return text, code_files
+    return text, code_files, files
 
 
-def _load_sources(repository: TaskRepository, task: TaskData, limit: int) -> list[SourceDocument]:
+def _load_sources(repository: TaskRepository, task: TaskData, limit: int,
+                  candidate_text: str = "",
+                  candidate_files: dict[str, str] | None = None,
+                  ) -> tuple[list[SourceDocument], dict[str, str]]:
     documents: list[SourceDocument] = []
-    for source in repository.load_sources(task, limit):
+    # Change 2 (R4): the LSH prefilter needs the candidate's content; when the
+    # switch is off (default) this value is ignored by ``load_sources``.
+    lsh_input = candidate_text
+    if candidate_files:
+        parts = [candidate_text] if candidate_text.strip() else []
+        parts.extend(candidate_files.values())
+        lsh_input = "\n".join(parts)
+    source_rows, library_status = repository.load_sources(task, limit, candidate_text=lsh_input)
+    for source in source_rows:
         own_text = source.online_text or ""
         files = repository.load_submission_files(source.submission_id)
         file_text, code_files = split_candidate_files(files)
@@ -81,7 +97,7 @@ def _load_sources(repository: TaskRepository, task: TaskData, limit: int) -> lis
             text=own_text,
             files=code_files,
         ))
-    return documents
+    return documents, library_status
 
 
 def run() -> None:
@@ -100,6 +116,9 @@ def run() -> None:
         while _running:
             task: TaskData | None = None
             try:
+                # Change 1: reap expired leases before every claim.  Idempotent,
+                # so a single call per loop is sufficient (no extra thread).
+                repository.reap_expired()
                 claimed = repository.claim()
                 if not claimed:
                     time.sleep(config.poll_seconds)

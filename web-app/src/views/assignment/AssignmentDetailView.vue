@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { assignmentApi } from '@/api/assignments'
 import { courseApi } from '@/api/courses'
 import { submissionApi } from '@/api/submissions'
 import { reviewApi } from '@/api/reviews'
+import { analyticsApi } from '@/api/analytics'
 import { fileApi } from '@/api/files'
 import { errorMessage } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
 import AssignmentEditDialog from '@/components/AssignmentEditDialog.vue'
-import type { Assignment, Course, CourseMember, Review, Submission, SubmissionFile } from '@/types/api'
+import ReviewFormPanel from '@/components/ReviewFormPanel.vue'
+import type { Assignment, CheckDistribution, Course, CourseMember, Review, Role, ScoreDistribution, Submission, SubmissionFile, SubmissionProgress } from '@/types/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -33,19 +35,25 @@ const reviewVisible = ref(false)
 const attachmentVisible = ref(false)
 const attachmentTitle = ref('')
 const attachmentItems = ref<SubmissionFile[]>([])
-const savingReview = ref(false)
-const review = ref<Review | null>(null)
-const reviewForm = reactive({ rawScore: 0, checkVerdict: 'ORIGINAL', comment: '' })
 const showAllVersions = ref(false)
 const assignmentDialogVisible = ref(false)
 const editAssignment = ref<Assignment | null>(null)
 const resultsVisible = ref(false)
 const myReview = ref<Review | null>(null)
+const progress = ref<SubmissionProgress | null>(null)
+const checkDist = ref<CheckDistribution | null>(null)
+const scoreDist = ref<ScoreDistribution | null>(null)
+const analyticsLoading = ref(false)
 
 const canManage = computed(() => Boolean(course.value && (auth.hasRole('ADMIN') || course.value.ownerId === auth.user?.id)))
 const canInstruct = computed(() => canManage.value || members.value.some((item) =>
   item.userId === auth.user?.id && item.status === 'ACTIVE' && item.memberRole === 'INSTRUCTOR'))
 const canReview = computed(() => auth.canReview && Boolean(course.value))
+/** 教师、助教与管理员均可进入评审（区别于仅教师/管理员的 canReview） */
+const canReviewEntry = computed(() => {
+  const roles = (auth.user?.roles ?? []) as Role[]
+  return roles.some((role) => role === 'TEACHER' || role === 'ASSISTANT' || role === 'ADMIN') && Boolean(course.value)
+})
 const isStudent = computed(() => auth.hasRole('STUDENT'))
 const effectiveSubmission = computed(() => submissions.value.find((item) => item.effective) ?? null)
 const latestSubmission = computed(() => submissions.value[0] ?? null)
@@ -62,12 +70,52 @@ const allowedFileTypes = computed(() => {
 })
 const fileAccept = computed(() => allowedFileTypes.value.map((type) => `.${type}`).join(','))
 
-const reviewStats = computed(() => ({
+const submissionFallback = computed(() => ({
   total: submissions.value.length,
   late: submissions.value.filter((item) => item.late).length,
   completed: submissions.value.filter((item) => ['CHECK_COMPLETED', 'REVIEWED', 'PUBLISHED'].includes(item.status)).length,
   failed: submissions.value.filter((item) => item.status === 'CHECK_FAILED').length,
 }))
+
+const submitRate = computed(() => progress.value?.submitRate ?? (submissionFallback.value.total ? 100 : 0))
+
+const progressMetrics = computed(() => {
+  const p = progress.value
+  const fallback = submissionFallback.value
+  return [
+    { label: '已交', value: p?.submittedCount ?? fallback.total },
+    { label: '未交', value: p?.unsubmittedCount ?? Math.max(0, fallback.total - fallback.completed) },
+    { label: '迟交', value: p?.lateCount ?? fallback.late },
+    { label: '查重中', value: p?.checkingCount ?? fallback.completed },
+    { label: '已完成', value: p?.completedCount ?? fallback.completed },
+  ]
+})
+
+const checkDistTotal = computed(() => {
+  const d = checkDist.value
+  if (!d) return 0
+  return d.passCount + d.warningCount + d.severeCount + d.unknownCount
+})
+
+const myDimensionScores = computed(() => {
+  const dims = assignment.value?.rubricDefinition?.dimensions ?? []
+  if (!dims.length) return []
+  return dims.map((dim) => {
+    const entry = myReview.value?.dimensionScores.find((item) => item.criterionId === dim.key)
+    return { name: dim.name, score: entry?.score ?? 0, max: dim.maxScore }
+  })
+})
+
+function distPercent(count: number): string {
+  if (!checkDistTotal.value) return '0%'
+  return `${Math.min(100, Math.round((count / checkDistTotal.value) * 100))}%`
+}
+
+function bandPercent(count: number): string {
+  const total = scoreDist.value?.count ?? 0
+  if (!total) return '0%'
+  return `${Math.min(100, Math.round((count / total) * 100))}%`
+}
 
 function format(value: string | null): string {
   if (!value) return '—'
@@ -105,6 +153,7 @@ async function load(): Promise<void> {
     resultsVisible.value = Boolean(assignment.value.resultsVisible)
     await loadSubmissions()
     if (isStudent.value) await loadMyReview()
+    else await loadAnalytics()
   } catch (error) {
     ElMessage.error(errorMessage(error))
     router.replace('/courses')
@@ -115,8 +164,26 @@ async function load(): Promise<void> {
 
 async function loadSubmissions(): Promise<void> {
   if (isStudent.value) submissions.value = await submissionApi.mine(assignmentId)
-  else if (canReview.value) submissions.value = await submissionApi.list(assignmentId, showAllVersions.value)
+  else if (canReviewEntry.value) submissions.value = await submissionApi.list(assignmentId, showAllVersions.value)
   else submissions.value = []
+}
+
+/** 教师/助教视角：拉取提交进度、查重分布与成绩分布（allSettled，单项失败不拖垮其它项） */
+async function loadAnalytics(): Promise<void> {
+  analyticsLoading.value = true
+  const [progressResult, checkResult, scoreResult] = await Promise.allSettled([
+    analyticsApi.submissionProgress(assignmentId),
+    analyticsApi.checkDistribution(assignmentId),
+    analyticsApi.scoreDistribution(assignmentId),
+  ])
+  if (progressResult.status === 'fulfilled') {
+    progress.value = progressResult.value
+  } else {
+    ElMessage.error(errorMessage(progressResult.reason))
+  }
+  if (checkResult.status === 'fulfilled') checkDist.value = checkResult.value
+  if (scoreResult.status === 'fulfilled') scoreDist.value = scoreResult.value
+  analyticsLoading.value = false
 }
 
 /** 学生端：拉取本人生效提交的评审结果（教师未开放时返回 NOT_STARTED，则展示占位） */
@@ -257,43 +324,14 @@ async function setEffective(item: Submission): Promise<void> {
   }
 }
 
-async function openReview(item: Submission): Promise<void> {
+function openReview(item: Submission): void {
   selected.value = item
   reviewVisible.value = true
-  review.value = null
-  try {
-    review.value = await reviewApi.get(item.id)
-    reviewForm.rawScore = review.value.rawScore ?? 0
-    reviewForm.checkVerdict = review.value.checkVerdict ?? 'ORIGINAL'
-    reviewForm.comment = review.value.comment ?? ''
-  } catch {
-    reviewForm.rawScore = 0
-    reviewForm.checkVerdict = 'ORIGINAL'
-    reviewForm.comment = ''
-  }
 }
 
-async function saveReview(submitAfter = false): Promise<void> {
-  if (!selected.value) return
-  savingReview.value = true
-  try {
-    await reviewApi.save(selected.value.id, {
-      rawScore: Number(reviewForm.rawScore), dimensionScores: [], annotations: [],
-      checkVerdict: reviewForm.checkVerdict, comment: reviewForm.comment,
-    })
-    if (submitAfter) {
-      await reviewApi.submit(selected.value.id)
-      ElMessage.success('评审已提交')
-      reviewVisible.value = false
-      await loadSubmissions()
-    } else {
-      ElMessage.success('评审草稿已保存')
-    }
-  } catch (error) {
-    ElMessage.error(errorMessage(error))
-  } finally {
-    savingReview.value = false
-  }
+function onReviewSubmitted(): void {
+  reviewVisible.value = false
+  loadSubmissions()
 }
 
 function openEdit(): void {
@@ -336,9 +374,10 @@ onMounted(load)
               <p>{{ course.courseCode }} · {{ course.name }}</p>
             </div>
             <div class="head-side">
-              <div v-if="canManage" class="head-actions">
-                <el-button size="small" @click="openEdit">编辑配置</el-button>
-                <el-button size="small" type="danger" plain @click="removeAssignment">删除作业</el-button>
+              <div class="head-actions">
+                <el-button v-if="canReviewEntry" size="small" type="primary" plain @click="router.push(`/assignments/${assignmentId}/review`)">评审工作台</el-button>
+                <el-button v-if="canManage" size="small" @click="openEdit">编辑配置</el-button>
+                <el-button v-if="canManage" size="small" type="danger" plain @click="removeAssignment">删除作业</el-button>
               </div>
               <div class="deadline-card" :class="{ urgent: deadlinePassed && !lateWindowOpen }">
                 <small>截止时间</small><strong>{{ format(assignment.deadlineAt) }}</strong>
@@ -357,6 +396,57 @@ onMounted(load)
                   <div><span>生效规则</span><b>{{ assignment.effectiveRule === 'MANUAL' ? '学生手动指定' : '最后一次提交' }}</b></div>
                   <div><span>多版本</span><b>{{ assignment.allowMultiVersion ? '允许' : '不允许' }}</b></div>
                   <div><span>迟交</span><b>{{ assignment.allowLate ? '允许，按规则扣分' : '不允许' }}</b></div>
+                </div>
+              </section>
+
+              <section v-if="!isStudent" class="surface surface-pad progress-panel">
+                <div class="section-title">
+                  <div><h2>提交进度</h2><p>提交率、查重分布与成绩分布（来自统计接口）。</p></div>
+                  <el-button size="small" :loading="analyticsLoading" @click="loadAnalytics">刷新统计</el-button>
+                </div>
+                <div class="progress-grid">
+                  <div class="progress-ring" :style="{ '--pct': `${submitRate * 3.6}deg` }">
+                    <div><strong>{{ submitRate.toFixed(1) }}%</strong><small>提交率</small></div>
+                  </div>
+                  <div class="progress-cards">
+                    <div v-for="metric in progressMetrics" :key="metric.label"><span>{{ metric.label }}</span><b>{{ metric.value }}</b></div>
+                  </div>
+                </div>
+                <div class="dist-grid">
+                  <div class="dist-block">
+                    <h3>查重分布</h3>
+                    <div class="dist-bars">
+                      <div class="dist-row"><span>通过</span><i><em class="bar-pass" :style="{ width: distPercent(checkDist?.passCount ?? 0) }" /></i><b>{{ checkDist?.passCount ?? 0 }}</b></div>
+                      <div class="dist-row"><span>警告</span><i><em class="bar-warning" :style="{ width: distPercent(checkDist?.warningCount ?? 0) }" /></i><b>{{ checkDist?.warningCount ?? 0 }}</b></div>
+                      <div class="dist-row"><span>严重</span><i><em class="bar-severe" :style="{ width: distPercent(checkDist?.severeCount ?? 0) }" /></i><b>{{ checkDist?.severeCount ?? 0 }}</b></div>
+                      <div class="dist-row"><span>待确认</span><i><em class="bar-unknown" :style="{ width: distPercent(checkDist?.unknownCount ?? 0) }" /></i><b>{{ checkDist?.unknownCount ?? 0 }}</b></div>
+                    </div>
+                    <div v-if="checkDist?.highRisk?.length" class="highrisk">
+                      <h4>高风险名单（≥ 严重阈值）</h4>
+                      <el-table :data="checkDist.highRisk" size="small" style="width: 100%">
+                        <el-table-column prop="submitterName" label="姓名" min-width="110" />
+                        <el-table-column prop="versionNo" label="版本" width="60"><template #default="{ row }">V{{ row.versionNo }}</template></el-table-column>
+                        <el-table-column label="相似度" width="85"><template #default="{ row }"><span class="score-severe">{{ row.overallScore.toFixed(1) }}%</span></template></el-table-column>
+                        <el-table-column label="等级" width="80"><template #default="{ row }"><el-tag size="small" type="danger" effect="plain">{{ row.level }}</el-tag></template></el-table-column>
+                      </el-table>
+                    </div>
+                    <p v-else class="muted small">暂无高风险提交。</p>
+                  </div>
+                  <div class="dist-block">
+                    <h3>成绩分布</h3>
+                    <div v-if="scoreDist?.bands?.length" class="score-bars">
+                      <div v-for="band in scoreDist.bands" :key="band.label" class="score-row">
+                        <span>{{ band.label }}</span><i><em :style="{ width: bandPercent(band.count) }" /></i><b>{{ band.count }}</b>
+                      </div>
+                    </div>
+                    <p v-else class="muted small">暂无成绩数据。</p>
+                    <div class="score-stats">
+                      <div><span>平均</span><b>{{ scoreDist?.mean?.toFixed(1) ?? '—' }}</b></div>
+                      <div><span>中位</span><b>{{ scoreDist?.median?.toFixed(1) ?? '—' }}</b></div>
+                      <div><span>最高</span><b>{{ scoreDist?.max ?? '—' }}</b></div>
+                      <div><span>最低</span><b>{{ scoreDist?.min ?? '—' }}</b></div>
+                    </div>
+                  </div>
                 </div>
               </section>
 
@@ -394,7 +484,7 @@ onMounted(load)
                   </div>
                 </div>
                 <div v-if="!isStudent" class="review-metrics">
-                  <span><b>{{ reviewStats.total }}</b>{{ showAllVersions ? '总提交' : '已交学生' }}</span><span><b>{{ reviewStats.late }}</b>迟交</span><span><b>{{ reviewStats.completed }}</b>可评审</span><span><b>{{ reviewStats.failed }}</b>查重失败</span>
+                  <span v-for="metric in progressMetrics" :key="metric.label"><b>{{ metric.value }}</b>{{ metric.label }}</span>
                 </div>
                 <el-table v-if="submissions.length" :data="submissions" style="width: 100%">
                   <el-table-column v-if="!isStudent" prop="submitterName" label="学生" min-width="105" />
@@ -406,7 +496,7 @@ onMounted(load)
                     <template #default="{ row }">
                       <el-button v-if="row.files?.length" link type="primary" @click="openAttachments(row)">附件 {{ row.files.length }}</el-button>
                       <el-button v-if="canOpenReport(row)" link type="primary" @click="router.push(`/submissions/${row.id}/report`)">查重报告</el-button>
-                      <el-button v-if="canReview && canOpenReport(row)" link type="primary" @click="openReview(row)">{{ ['REVIEWED', 'PUBLISHED'].includes(row.status) ? '修改评审结果' : '评审' }}</el-button>
+                      <el-button v-if="canReviewEntry && canOpenReport(row)" link type="primary" @click="openReview(row)">{{ ['REVIEWED', 'PUBLISHED'].includes(row.status) ? '修改评审结果' : '评审' }}</el-button>
                       <el-button v-if="canInstruct && assignment.effectiveRule === 'MANUAL' && !row.effective" link @click="setEffective(row)">设为生效</el-button>
                     </template>
                   </el-table-column>
@@ -423,7 +513,20 @@ onMounted(load)
                     <div><span>查重结论</span><b>{{ verdictText(myReview.checkVerdict) }}</b></div>
                     <div><span>评审时间</span><b>{{ myReview.submittedAt ? format(myReview.submittedAt) : '—' }}</b></div>
                   </div>
+                  <div v-if="myDimensionScores.length" class="dimension-score-list">
+                    <div v-for="item in myDimensionScores" :key="item.name"><span>{{ item.name }}</span><b>{{ item.score }}<small> / {{ item.max }}</small></b></div>
+                    <div class="dimension-total"><span>维度合计</span><b>{{ myDimensionScores.reduce((sum, item) => sum + item.score, 0) }}</b></div>
+                  </div>
                   <p v-if="myReview.comment" class="my-review-comment">{{ myReview.comment }}</p>
+                  <el-collapse v-if="myReview.annotations?.length" class="annotation-block">
+                    <el-collapse-item v-for="ann in myReview.annotations" :key="ann.id" :name="ann.id">
+                      <template #title>
+                        <span class="annotation-title">{{ ann.text.slice(0, 26) }}{{ ann.text.length > 26 ? '…' : '' }}</span>
+                      </template>
+                      <p v-if="ann.quote" class="annotation-quote">“{{ ann.quote }}”</p>
+                      <p class="annotation-text">{{ ann.text }}</p>
+                    </el-collapse-item>
+                  </el-collapse>
                 </template>
                 <div v-else class="empty-line">教师尚未完成评审或尚未开放查看。</div>
               </section>
@@ -454,8 +557,8 @@ onMounted(load)
       </template>
     </el-skeleton>
 
-    <el-drawer v-model="reviewVisible" title="作业评审" size="min(520px, 94vw)" destroy-on-close>
-      <template v-if="selected">
+    <el-drawer v-model="reviewVisible" title="作业评审" size="min(560px, 94vw)" destroy-on-close>
+      <template v-if="selected && assignment">
         <div class="review-student"><span>{{ selected.submitterName }}</span><small>第 {{ selected.versionNo }} 版 · {{ format(selected.submittedAt) }}</small></div>
         <div class="review-content">{{ selected.onlineText || '该提交没有在线文本。' }}</div>
         <div v-if="selected.files?.length" class="review-files">
@@ -464,12 +567,7 @@ onMounted(load)
             {{ file.originalName }}（{{ formatBytes(file.sizeBytes) }}）
           </el-button>
         </div>
-        <el-form label-position="top" class="review-form">
-          <el-form-item label="原始得分"><el-input-number v-model="reviewForm.rawScore" :min="0" :max="100" :precision="1" style="width: 100%" /></el-form-item>
-          <el-form-item label="查重结论"><el-select v-model="reviewForm.checkVerdict" style="width: 100%"><el-option label="原创" value="ORIGINAL" /><el-option label="疑似抄袭" value="SUSPECTED_PLAGIARISM" /><el-option label="需要面谈" value="INTERVIEW_REQUIRED" /></el-select></el-form-item>
-          <el-form-item label="评语"><el-input v-model="reviewForm.comment" type="textarea" :rows="4" placeholder="填写反馈与改进建议" /></el-form-item>
-        </el-form>
-        <div class="drawer-actions"><el-button :loading="savingReview" @click="saveReview(false)">保存草稿</el-button><el-button type="primary" :loading="savingReview" @click="saveReview(true)">提交评审</el-button></div>
+        <ReviewFormPanel :submission-id="selected.id" :assignment="assignment" @submitted="onReviewSubmitted" />
       </template>
     </el-drawer>
 
@@ -538,6 +636,49 @@ onMounted(load)
 .my-review-grid b { font-size: 20px; letter-spacing: -.04em; }
 .my-review-grid b small { font-size: 11px; font-weight: 400; color: #8994a1; margin-left: 3px; }
 .my-review-comment { margin: 15px 0 0; color: #4f5d69; font-size: 12px; line-height: 1.9; background: #fcfdfd; border: 1px solid #e6ecec; border-radius: 10px; padding: 13px 15px; white-space: pre-wrap; }
+.dimension-score-list { display: grid; gap: 7px; margin-top: 14px; }
+.dimension-score-list > div { display: flex; justify-content: space-between; align-items: center; padding: 9px 13px; background: #f6f9f9; border-radius: 9px; font-size: 12px; }
+.dimension-score-list span { color: #7d8996; }
+.dimension-score-list b { color: #354652; }
+.dimension-score-list b small { font-weight: 400; color: #97a1ac; margin-left: 3px; }
+.dimension-score-list .dimension-total b { color: #0f766e; }
+.annotation-block { margin-top: 16px; }
+.annotation-block :deep(.el-collapse) { border: 1px solid #e6ecec; border-radius: 10px; }
+.annotation-title { font-size: 12px; color: #354652; }
+.annotation-quote { margin: 0 0 8px; padding: 8px 11px; background: #f1f3f4; border-left: 3px solid #cfdadb; border-radius: 6px; color: #5b6874; font-size: 12px; line-height: 1.7; }
+.annotation-text { margin: 0; color: #46535f; font-size: 12px; line-height: 1.8; }
+.progress-panel { margin-bottom: 17px; }
+.progress-grid { display: grid; grid-template-columns: 150px 1fr; gap: 18px; align-items: center; margin-bottom: 18px; }
+.progress-ring { --pct: 0deg; width: 130px; height: 130px; border-radius: 50%; display: grid; place-content: center; background: conic-gradient(#0f766e var(--pct), #e3eaec 0); }
+.progress-ring div { width: 102px; height: 102px; border-radius: 50%; background: #fff; display: grid; place-content: center; text-align: center; }
+.progress-ring strong { font-size: 22px; color: #0f766e; letter-spacing: -.03em; }
+.progress-ring small { color: #8b96a2; font-size: 10px; margin-top: 4px; }
+.progress-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; }
+.progress-cards > div { background: #f6f9f9; border-radius: 10px; padding: 13px 14px; }
+.progress-cards span { display: block; color: #7d8996; font-size: 11px; margin-bottom: 7px; }
+.progress-cards b { font-size: 22px; color: #24413e; }
+.dist-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.dist-block { border-top: 1px solid #edf1f2; padding-top: 15px; }
+.dist-block h3 { font-size: 14px; margin-bottom: 13px; }
+.dist-bars { display: grid; gap: 9px; }
+.dist-row { display: grid; grid-template-columns: 52px 1fr 30px; gap: 9px; align-items: center; font-size: 11px; }
+.dist-row span { color: #7d8996; }
+.dist-row i { display: block; height: 7px; border-radius: 5px; background: #edf2f1; overflow: hidden; }
+.dist-row em { display: block; height: 100%; border-radius: 5px; }
+.bar-pass { background: #28a98b; }.bar-warning { background: #e5a23d; }.bar-severe { background: #d9584a; }.bar-unknown { background: #aab4be; }
+.dist-row b { text-align: right; color: #43525f; }
+.highrisk { margin-top: 16px; }
+.highrisk h4 { font-size: 12px; color: #b34235; margin-bottom: 9px; }
+.score-bars { display: grid; gap: 9px; margin-bottom: 15px; }
+.score-row { display: grid; grid-template-columns: 90px 1fr 30px; gap: 9px; align-items: center; font-size: 11px; }
+.score-row span { color: #7d8996; }
+.score-row i { display: block; height: 7px; border-radius: 5px; background: #edf2f1; overflow: hidden; }
+.score-row em { display: block; height: 100%; border-radius: 5px; background: #0f766e; }
+.score-row b { text-align: right; color: #43525f; }
+.score-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.score-stats > div { background: #f6f9f9; border-radius: 9px; padding: 10px 12px; }
+.score-stats span { display: block; color: #7d8996; font-size: 10px; margin-bottom: 4px; }
+.score-stats b { font-size: 16px; color: #24413e; }
 .review-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-bottom: 16px; }
 .review-metrics span { background: #f6f9f9; border-radius: 9px; padding: 10px 12px; font-size: 10px; color: #85919e; display: flex; flex-direction: column; gap: 3px; }
 .review-metrics b { font-size: 20px; color: #24413e; }
@@ -565,5 +706,5 @@ onMounted(load)
 .attachment-row strong { font-size: 12px; color: #354652; }
 .attachment-row small { margin-top: 4px; color: #93a0ac; font-size: 10px; }
 .drawer-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
-@media (max-width: 640px) { .deadline-card { width: 100%; } .submit-actions { align-items: stretch; flex-direction: column; } .review-metrics { grid-template-columns: 1fr 1fr; } .rule-grid { grid-template-columns: 1fr; } .file-upload-head { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 640px) { .deadline-card { width: 100%; } .submit-actions { align-items: stretch; flex-direction: column; } .review-metrics { grid-template-columns: 1fr 1fr; } .rule-grid { grid-template-columns: 1fr; } .file-upload-head { align-items: flex-start; flex-direction: column; } .progress-grid { grid-template-columns: 1fr; justify-items: center; } .progress-cards { grid-template-columns: repeat(2, 1fr); } .dist-grid { grid-template-columns: 1fr; } .score-stats { grid-template-columns: repeat(2, 1fr); } }
 </style>

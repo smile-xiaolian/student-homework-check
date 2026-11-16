@@ -22,5 +22,9 @@ public class IdentityQueryService {
     public Optional<UserAccount> findByLogin(String login) {
         return Optional.ofNullable(userAccountMapper.findByLogin(login));
     }
+
+    public Optional<UserAccount> findByUserNo(String userNo) {
+        return Optional.ofNullable(userAccountMapper.findByUserNo(userNo));
+    }
 }
 

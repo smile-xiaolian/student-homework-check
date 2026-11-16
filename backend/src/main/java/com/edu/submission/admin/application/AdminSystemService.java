@@ -11,6 +11,8 @@ import com.edu.submission.shared.api.Pagination;
 import com.edu.submission.shared.security.UserPrincipal;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -80,7 +82,36 @@ public class AdminSystemService {
         result.put("failedCheckTasks", count("SELECT count(*) FROM app.check_task WHERE status = 'FAILED'"));
         result.put("reportsToday", count("SELECT count(*) FROM app.check_report WHERE generated_at >= current_date"));
         result.put("unreadNotifications", count("SELECT count(*) FROM app.notification WHERE is_read = false"));
+        result.put("storageUsedBytes", count("SELECT coalesce(sum(size_bytes), 0) FROM app.file_object"));
+        result.put("storageObjectCount", count("SELECT count(*) FROM app.file_object"));
+        result.put("checkFailureRate", checkFailureRate());
+        result.put("avgQueueDelaySeconds", avgQueueDelaySeconds());
+        result.put("requeuedCheckTasks", count("SELECT coalesce(sum(requeue_count), 0) FROM app.check_task"));
         return result;
+    }
+
+    /** 近 7 天失败任务数 / 近 7 天终态任务数（SUCCEEDED/FAILED/CANCELLED），保留 4 位小数，分母为 0 返回 0。 */
+    private double checkFailureRate() {
+        long failed = count("SELECT count(*) FROM app.check_task WHERE status = 'FAILED' " +
+                "AND created_at >= now() - interval '7 days'");
+        long terminal = count("SELECT count(*) FROM app.check_task WHERE status IN ('SUCCEEDED','FAILED','CANCELLED') " +
+                "AND created_at >= now() - interval '7 days'");
+        if (terminal == 0) {
+            return 0;
+        }
+        return BigDecimal.valueOf(failed).divide(BigDecimal.valueOf(terminal), 4, RoundingMode.HALF_UP).doubleValue();
+    }
+
+    /** 近 7 天已领取任务的平均排队秒数（领取时间 - 创建时间），分母为 0 返回 0。 */
+    private double avgQueueDelaySeconds() {
+        Double value = jdbcTemplate.queryForObject(
+                "SELECT coalesce(avg(extract(epoch from (coalesce(started_at, created_at) - created_at))), 0) " +
+                        "FROM app.check_task WHERE started_at IS NOT NULL AND created_at >= now() - interval '7 days'",
+                Double.class);
+        if (value == null || value.isNaN() || value.isInfinite()) {
+            return 0;
+        }
+        return BigDecimal.valueOf(value).setScale(4, RoundingMode.HALF_UP).doubleValue();
     }
 
     @Transactional(readOnly = true)
@@ -125,6 +156,67 @@ public class AdminSystemService {
                     return row;
                 }, arguments.toArray());
         return new PageResult<>(items, Pagination.of(query.page(), query.size(), total));
+    }
+
+    /** 审计日志导出 CSV（UTF-8 BOM + 表头），单次上限 20000 行。 */
+    @Transactional(readOnly = true)
+    public String exportAuditsCsv(Integer page, Integer size, String action, String actorId, String result) {
+        int safePage = page == null ? 1 : Math.max(1, page);
+        int safeSize = size == null ? 20000 : Math.min(20000, Math.max(1, size));
+        StringBuilder where = new StringBuilder(" WHERE 1 = 1");
+        List<Object> arguments = new ArrayList<>();
+        if (action != null && !action.isBlank()) {
+            where.append(" AND action LIKE ?");
+            arguments.add("%" + action.trim() + "%");
+        }
+        if (actorId != null && !actorId.isBlank()) {
+            where.append(" AND actor_id = ?::uuid");
+            arguments.add(actorId.trim());
+        }
+        if (result != null && !result.isBlank()) {
+            where.append(" AND result = ?");
+            arguments.add(result.trim());
+        }
+        arguments.add(safeSize);
+        arguments.add((long) (safePage - 1) * safeSize);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "SELECT id, actor_id, actor_type, action, target_type, target_id, result, " +
+                        "detail::text AS detail, host(ip) AS ip, trace_id, created_at " +
+                        "FROM audit.audit_log" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                arguments.toArray());
+        StringBuilder csv = new StringBuilder();
+        csv.append('\uFEFF');
+        csv.append("id,actorId,actorType,action,targetType,targetId,result,detail,ip,traceId,createdAt\r\n");
+        for (Map<String, Object> row : rows) {
+            csv.append(csvCell(row.get("id"))).append(',')
+                    .append(csvCell(row.get("actor_id"))).append(',')
+                    .append(csvCell(row.get("actor_type"))).append(',')
+                    .append(csvCell(row.get("action"))).append(',')
+                    .append(csvCell(row.get("target_type"))).append(',')
+                    .append(csvCell(row.get("target_id"))).append(',')
+                    .append(csvCell(row.get("result"))).append(',')
+                    .append(csvCell(row.get("detail"))).append(',')
+                    .append(csvCell(row.get("ip"))).append(',')
+                    .append(csvCell(row.get("trace_id"))).append(',')
+                    .append(csvCell(row.get("created_at"))).append("\r\n");
+        }
+        return csv.toString();
+    }
+
+    private String csvCell(Object value) {
+        if (value == null) {
+            return "";
+        }
+        String text;
+        if (value instanceof java.sql.Timestamp timestamp) {
+            text = timestamp.toInstant().atOffset(java.time.ZoneOffset.UTC).toString();
+        } else {
+            text = String.valueOf(value);
+        }
+        if (text.contains(",") || text.contains("\"") || text.contains("\n") || text.contains("\r")) {
+            return "\"" + text.replace("\"", "\"\"") + "\"";
+        }
+        return text;
     }
 
     private long count(String sql) {

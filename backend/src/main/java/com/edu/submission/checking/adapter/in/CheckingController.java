@@ -3,6 +3,7 @@ package com.edu.submission.checking.adapter.in;
 import com.edu.submission.checking.adapter.in.dto.CheckReportSummary;
 import com.edu.submission.checking.adapter.in.dto.CheckReportView;
 import com.edu.submission.checking.adapter.in.dto.CheckTaskView;
+import com.edu.submission.checking.application.CheckTaskService;
 import com.edu.submission.checking.application.CheckingQueryService;
 import com.edu.submission.shared.security.CurrentUser;
 import java.util.List;
@@ -26,9 +27,12 @@ import org.springframework.web.bind.annotation.RestController;
 public class CheckingController {
 
     private final CheckingQueryService checkingQueryService;
+    private final CheckTaskService checkTaskService;
 
-    public CheckingController(CheckingQueryService checkingQueryService) {
+    public CheckingController(CheckingQueryService checkingQueryService,
+                              CheckTaskService checkTaskService) {
         this.checkingQueryService = checkingQueryService;
+        this.checkTaskService = checkTaskService;
     }
 
     @GetMapping("/check-tasks/{id}")
@@ -94,5 +98,11 @@ public class CheckingController {
         String reason = body == null ? null : String.valueOf(body.getOrDefault("reason", ""));
         return ResponseEntity.accepted().body(
                 checkingQueryService.recheck(CurrentUser.require(), id, reason, key));
+    }
+
+    @PostMapping("/check-tasks/{id}/retry")
+    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
+    public Map<String, Object> retry(@PathVariable UUID id) {
+        return checkTaskService.retry(CurrentUser.require(), id);
     }
 }

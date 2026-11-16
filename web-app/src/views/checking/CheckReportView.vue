@@ -5,10 +5,12 @@ import { ElMessage } from 'element-plus'
 import { checkingApi } from '@/api/checking'
 import { submissionApi } from '@/api/submissions'
 import { errorMessage } from '@/api/http'
+import { useAuthStore } from '@/stores/auth'
 import type { CheckReport, CheckSegment, CheckSource, CheckTask, Submission } from '@/types/api'
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 const submissionId = String(route.params.id)
 const loading = ref(true)
 const report = ref<CheckReport | null>(null)
@@ -16,6 +18,10 @@ const task = ref<CheckTask | null>(null)
 const submission = ref<Submission | null>(null)
 const segments = ref<CheckSegment[]>([])
 const sources = ref<CheckSource[]>([])
+const history = ref<CheckReport[]>([])
+const historyVisible = ref(false)
+const loadingHistory = ref(false)
+const selectedVersionId = ref<string | null>(null)
 let pollTimer: number | null = null
 
 const scoreTone = computed(() => report.value?.level === 'SEVERE' ? 'severe' : report.value?.level === 'WARNING' ? 'warning' : 'pass')
@@ -24,6 +30,61 @@ const taskStage = computed(() => task.value?.stage || ({
   QUEUED: '排队等待中', PREPROCESSING: '正在预处理文本', COMPARING: '正在比对比对库',
   REPORTING: '正在生成报告', SUCCEEDED: '查重完成', FAILED: '查重失败', CANCELLED: '任务已取消',
 } as Record<string, string>)[task.value?.status ?? ''] || '等待查重')
+
+const excludedItems = computed(() => toLabelList(report.value?.params?.excludedItems))
+const usedLibraries = computed(() => toLabelList(report.value?.params?.libraries))
+
+function toLabelList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => {
+    if (typeof item === 'string') return item
+    if (item && typeof item === 'object') {
+      const obj = item as Record<string, unknown>
+      return String(obj.name ?? obj.id ?? obj.label ?? '')
+    }
+    return String(item)
+  }).filter((item) => item.length > 0)
+}
+
+function sourceForSegment(segment: CheckSegment): CheckSource | undefined {
+  if (!segment.sourceId) return undefined
+  return sources.value.find((source) => source.sourceId === segment.sourceId)
+}
+
+async function loadHistory(): Promise<void> {
+  loadingHistory.value = true
+  try {
+    history.value = (await checkingApi.reportHistory(submissionId)).items
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    loadingHistory.value = false
+  }
+}
+
+async function toggleHistory(): Promise<void> {
+  historyVisible.value = !historyVisible.value
+  if (historyVisible.value && !history.value.length) await loadHistory()
+}
+
+async function switchReport(id: string): Promise<void> {
+  loading.value = true
+  try {
+    const data = await checkingApi.report(id)
+    report.value = data
+    const [segmentPage, sourcePage] = await Promise.all([
+      checkingApi.segments(data.id, { size: 100 }),
+      checkingApi.sources(data.id, { size: 100 }),
+    ])
+    segments.value = segmentPage.items
+    sources.value = sourcePage.items
+    selectedVersionId.value = id
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    loading.value = false
+  }
+}
 
 function format(value: string | null): string {
   if (!value) return '—'
@@ -115,6 +176,10 @@ onBeforeUnmount(() => { if (pollTimer) window.clearTimeout(pollTimer) })
               <h1>原创性检测报告</h1>
               <p>报告版本 V{{ report.reportVersion }} · {{ format(report.generatedAt) }} 生成</p>
               <div class="head-meta"><span>算法 {{ report.algorithmVersion }}</span><span>{{ report.sourceCount }} 个相似来源</span><span>摘要 {{ report.reportDigest.slice(0, 12) }}…</span></div>
+              <div v-if="usedLibraries.length || excludedItems.length" class="head-params">
+                <span v-if="usedLibraries.length">比对库：{{ usedLibraries.join('、') }}</span>
+                <span v-if="excludedItems.length">排除项：{{ excludedItems.join('、') }}</span>
+              </div>
             </div>
             <div class="score-ring" :style="{ '--score': `${report.overallScore * 3.6}deg` }">
               <div><strong>{{ report.overallScore.toFixed(1) }}</strong><small>总体相似度</small></div>
@@ -131,11 +196,39 @@ onBeforeUnmount(() => { if (pollTimer) window.clearTimeout(pollTimer) })
 
           <div class="split-grid report-grid">
             <section class="surface surface-pad">
-              <div class="section-head"><div><h2>分段比对</h2><p>高亮部分表示与比对源存在相似内容。</p></div><el-button v-if="report" size="small" @click="recheck">申请重查</el-button></div>
+              <div class="section-head">
+                <div><h2>分段比对</h2><p>左侧为本人原文（按真实区间高亮），右侧为对应来源摘录。</p></div>
+                <div class="section-actions">
+                  <el-button size="small" @click="toggleHistory">历史报告版本</el-button>
+                  <el-button v-if="auth.canReview" size="small" @click="recheck">申请重查</el-button>
+                </div>
+              </div>
+              <div v-if="historyVisible" class="history-panel">
+                <div v-if="loadingHistory" class="muted small">正在加载历史版本……</div>
+                <template v-else>
+                  <button v-for="item in history" :key="item.id" type="button"
+                          class="history-chip" :class="{ active: (selectedVersionId ?? report.id) === item.id }"
+                          @click="switchReport(item.id)">
+                    V{{ item.reportVersion }} · {{ item.overallScore.toFixed(1) }}% · {{ item.level }}
+                    <small>{{ item.isCurrent ? '当前' : '' }}</small>
+                  </button>
+                  <div v-if="!history.length" class="muted small">暂无其他历史版本。</div>
+                </template>
+              </div>
               <div v-if="segments.length" class="segment-list">
                 <article v-for="segment in segments" :key="segment.segmentId" class="segment">
                   <header><span>{{ segment.section || '正文片段' }}<small v-if="segment.pageNo">第 {{ segment.pageNo }} 页</small></span><b>{{ segment.similarity.toFixed(1) }}%</b></header>
-                  <p><template v-for="(part, index) in highlightParts(segment)" :key="index"><mark v-if="part.highlighted">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></p>
+                  <div class="compare-columns">
+                    <div class="compare-col">
+                      <h4>本人原文</h4>
+                      <p><template v-for="(part, index) in highlightParts(segment)" :key="index"><mark v-if="part.highlighted">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></p>
+                    </div>
+                    <div class="compare-col source-col">
+                      <h4>来源摘录</h4>
+                      <p v-if="sourceForSegment(segment)">{{ sourceForSegment(segment)?.excerpt || '（该来源未提供摘录）' }}</p>
+                      <p v-else class="muted">（无对应来源片段）</p>
+                    </div>
+                  </div>
                 </article>
               </div>
               <div v-else class="empty-line">该报告没有需要高亮的分段。</div>
@@ -187,6 +280,7 @@ onBeforeUnmount(() => { if (pollTimer) window.clearTimeout(pollTimer) })
 .head-copy h1 { font-size: clamp(28px, 4vw, 40px); margin-bottom: 9px; letter-spacing: -.04em; }
 .head-copy > p:not(.eyebrow) { color: #b8d9d4; font-size: 12px; margin-bottom: 19px; }
 .head-meta { display: flex; gap: 16px; flex-wrap: wrap; color: #8fc5bd; font-size: 10px; }
+.head-params { display: flex; gap: 14px; flex-wrap: wrap; color: #a9d4cd; font-size: 10px; margin-top: 13px; }
 .score-ring { --score: 0deg; position: relative; z-index: 1; width: 148px; height: 148px; flex: 0 0 148px; border-radius: 50%; display: grid; place-content: center; background: conic-gradient(#f4c95d var(--score), rgba(255,255,255,.12) 0); }
 .score-ring::before { content: ''; position: absolute; inset: 9px; border-radius: 50%; background: #113d39; }
 .warning .score-ring::before { background: #5c4818; }
@@ -210,6 +304,17 @@ onBeforeUnmount(() => { if (pollTimer) window.clearTimeout(pollTimer) })
 .section-head { display: flex; justify-content: space-between; gap: 14px; align-items: start; margin-bottom: 16px; }
 .section-head h2 { font-size: 18px; margin: 0 0 4px; }
 .section-head p { margin: 0; color: #8a95a1; font-size: 11px; }
+.section-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+.history-panel { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; padding: 11px 13px; background: #f6f9f9; border: 1px solid #e6ecec; border-radius: 10px; }
+.history-chip { border: 1px solid #dbe4e3; background: #fff; border-radius: 8px; padding: 6px 10px; font-size: 11px; color: #43525f; cursor: pointer; }
+.history-chip small { color: #0f766e; margin-left: 4px; }
+.history-chip.active { border-color: #0f766e; background: #e7f6f2; color: #0f766e; font-weight: 700; }
+.compare-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
+.compare-col { border: 1px solid #e7eded; border-radius: 9px; padding: 11px 12px; background: #fbfcfc; min-width: 0; }
+.compare-col h4 { font-size: 11px; color: #7d8996; margin: 0 0 7px; }
+.compare-col p { margin: 0; line-height: 1.85; font-size: 12px; color: #46535f; white-space: pre-wrap; }
+.source-col { background: #fffaf0; border-color: #f1e5c9; }
+.source-col h4 { color: #8b743f; }
 .segment-list { display: flex; flex-direction: column; gap: 12px; }
 .segment { border: 1px solid #e6ecec; border-radius: 11px; padding: 13px 15px; background: #fcfdfd; }
 .segment header { display: flex; justify-content: space-between; color: #667481; font-size: 10px; margin-bottom: 8px; }
@@ -240,5 +345,5 @@ mark { background: #fee7a6; color: inherit; padding: 1px 0; border-radius: 2px; 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes reverse-spin { to { transform: rotate(-360deg); } }
 @media (max-width: 1050px) { .summary-grid { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 720px) { .report-head { flex-wrap: wrap; gap: 20px; padding: 25px; } .head-copy { flex-basis: 100%; } .score-ring { width: 112px; height: 112px; flex-basis: 112px; } .score-ring strong { font-size: 31px; } .summary-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 720px) { .report-head { flex-wrap: wrap; gap: 20px; padding: 25px; } .head-copy { flex-basis: 100%; } .score-ring { width: 112px; height: 112px; flex-basis: 112px; } .score-ring strong { font-size: 31px; } .summary-grid { grid-template-columns: 1fr 1fr; } .compare-columns { grid-template-columns: 1fr; } }
 </style>

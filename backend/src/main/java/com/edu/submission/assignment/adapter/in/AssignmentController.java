@@ -80,6 +80,20 @@ public class AssignmentController {
         return ResponseEntity.ok().header(HttpHeaders.ETAG, Etags.format(view.rowVersion())).body(view);
     }
 
+    @PostMapping("/assignments/{id}/close")
+    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
+    public ResponseEntity<AssignmentView> close(@PathVariable UUID id) {
+        AssignmentView view = assignmentService.close(CurrentUser.require(), id);
+        return ResponseEntity.ok().header(HttpHeaders.ETAG, Etags.format(view.rowVersion())).body(view);
+    }
+
+    @PostMapping("/assignments/{id}/archive")
+    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
+    public ResponseEntity<AssignmentView> archive(@PathVariable UUID id) {
+        AssignmentView view = assignmentService.archive(CurrentUser.require(), id);
+        return ResponseEntity.ok().header(HttpHeaders.ETAG, Etags.format(view.rowVersion())).body(view);
+    }
+
     @PutMapping("/assignments/{id}/results-visibility")
     @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
     public ResponseEntity<AssignmentView> putResultsVisibility(

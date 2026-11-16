@@ -1,5 +1,5 @@
 import { http } from './http'
-import type { AdminUser, PageResult, SystemConfigItem } from '@/types/api'
+import type { AdminUser, AuditLog, ImportResult, PageResult, SystemConfigItem } from '@/types/api'
 
 export const adminApi = {
   users(params: Record<string, unknown> = {}) {
@@ -30,6 +30,19 @@ export const adminApi = {
     return http.get<Record<string, unknown>>('/admin/monitoring/summary').then((r) => r.data)
   },
   audits(params: Record<string, unknown> = {}) {
-    return http.get<PageResult<Record<string, unknown>>>('/admin/audits', { params }).then((r) => r.data)
+    return http.get<PageResult<AuditLog>>('/admin/audits', { params }).then((r) => r.data)
+  },
+  auditExport(params: Record<string, unknown> = {}) {
+    return http.get<Blob>('/admin/audits/export', { params, responseType: 'blob' }).then((r) => r.data)
+  },
+  /** Excel 批量导入用户（multipart） */
+  importUsers(file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return http.post<ImportResult>('/admin/users/import', form, { timeout: 120_000 }).then((r) => r.data)
+  },
+  /** 下载用户导入模板（xlsx） */
+  importUsersTemplate() {
+    return http.get<Blob>('/admin/users/import-template', { responseType: 'blob' }).then((r) => r.data)
   },
 }

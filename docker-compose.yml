@@ -108,6 +108,19 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+    # 容器入口为 `python -m checker.worker`（见 engine/Dockerfile CMD，worker 为 PID 1）。
+    # 优先用 pgrep 检测进程存活；python:3.12-slim 未内置 procps 时回退到 /proc/1/cmdline，
+    # [c] 字符类避免匹配健康检查自身 shell。
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f '[c]hecker.worker' > /dev/null 2>&1 || grep -aq 'checker.worker' /proc/1/cmdline"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # 查重任务队列使用 FOR UPDATE SKIP LOCKED，多消费者（副本）可安全并发领取任务互不干扰；
+    # 需要提高吞吐时可把 replicas 调到 2+（配合 CHECK_POLL_SECONDS/CHECK_LEASE_SECONDS 合理取值），
+    # 用 `docker compose up -d --build check-worker` 或 `docker compose up -d --build` 生效。
+    deploy:
+      replicas: 1
     restart: unless-stopped
 
   web-app:
