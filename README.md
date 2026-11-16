@@ -72,8 +72,7 @@ docker compose up -d --build
 ```
 
 > 端口提示：本项目占用 5432（PostgreSQL）、9000/9001（MinIO）、8080（API）、8088（Web）。
-> 同目录下的 student-homework-check 项目同样使用 5432，两套系统不能同时运行：
-> 切换前先 `docker compose down` 停掉本系统，或 `docker compose -p homework-check stop` 暂停对方。
+> 同样使用 5432端口的两套系统不能同时运行。切换前先 `docker compose down` 停掉本系统，或 `docker compose -p homework-check stop` 暂停对方。
 
 查看日志或停止服务：
 
