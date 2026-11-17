@@ -194,5 +194,6 @@ Invoke-RestMethod http://localhost:8080/api/v1/system/health
 - `teaching-service` 未就绪：先查看 `docker compose logs postgres minio minio-init teaching-service`，确认数据库健康且 MinIO 桶初始化完成。
 - 上传返回 413：检查前端反向代理 `client_max_body_size`、`UPLOAD_MAX_REQUEST_SIZE` 与系统参数 `file.max_size_bytes`。
 - 查重任务一直排队：确认 `check-worker` 正在运行，并检查数据库连接与对象存储凭据。
+- **所有查重永久卡在 `CHECKING` / 任务一直是 `QUEUED`，但 worker 显示已启动**：查看 `docker compose logs check-worker`，若反复出现 `psycopg.errors.UndefinedColumn` 即为租约回收语句 `TaskRepository.reap_expired()` 抛错——它在每轮循环最前面执行、且位于 `claim()` 之前，一旦抛错，任何任务都无法被认领。已知一次此类缺陷：该语句曾把 `submitter_id` / `course_id` 当作 `app.check_task` 的列直接 `RETURNING`，而这两列实际属于 `app.submission` / `app.assignment`。修复方式是在 `UPDATE` 中 `FROM app.submission s JOIN app.assignment a ON a.id = s.assignment_id`，并从这两个表取值。回归测试见 `engine/tests/test_reap_sql.py`。
 - 浏览器登录后接口 401：确认 `JWT_SECRET` 未在服务运行期间更换，且允许来源包含当前前端地址。
 

@@ -152,15 +152,19 @@ class TaskRepository:
         marked ``CHECK_FAILED`` and admins/course instructors are notified.
         """
         sql = """
-            UPDATE app.check_task
+            UPDATE app.check_task t
             SET status = 'QUEUED', lease_owner = NULL, lease_until = NULL, heartbeat_at = NULL,
                 error_code = 'LEASE_EXPIRED',
                 error_detail = '任务租约过期，已自动重新入队',
-                requeue_count = requeue_count + 1,
+                requeue_count = t.requeue_count + 1,
                 scheduled_at = now(), updated_at = now()
-            WHERE status IN ('PREPROCESSING','COMPARING','REPORTING')
-              AND lease_until IS NOT NULL AND lease_until < now()
-            RETURNING id, submission_id, submitter_id, course_id, attempt, requeue_count, task_type
+            FROM app.submission s
+            JOIN app.assignment a ON a.id = s.assignment_id
+            WHERE t.submission_id = s.id
+              AND t.status IN ('PREPROCESSING','COMPARING','REPORTING')
+              AND t.lease_until IS NOT NULL AND t.lease_until < now()
+            RETURNING t.id, t.submission_id, s.submitter_id, a.course_id,
+                      t.attempt, t.requeue_count, t.task_type
         """
         with self.conn.transaction():
             rows = self.conn.execute(sql).fetchall()

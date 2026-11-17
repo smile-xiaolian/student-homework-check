@@ -41,8 +41,6 @@ const whitelistLibraries = ref<Library[]>([])
 const selectedWhitelistIds = ref<string[]>([])
 const excludeReferences = ref(true)
 const excludeTemplate = ref(true)
-const checkConfigEtag = ref<string | undefined>(undefined)
-const rubricEtag = ref<string | undefined>(undefined)
 
 interface RubricRow {
   key: string
@@ -145,8 +143,6 @@ async function loadWhitelistLibraries(): Promise<void> {
 
 async function fillForm(): Promise<void> {
   const item = props.assignment
-  checkConfigEtag.value = undefined
-  rubricEtag.value = undefined
   if (item) {
     form.title = item.title
     form.description = item.description ?? ''
@@ -157,15 +153,13 @@ async function fillForm(): Promise<void> {
     form.checkEnabled = item.checkEnabled
     form.allowMultiVersion = item.allowMultiVersion
     form.effectiveRule = item.effectiveRule
-    // 查重配置：优先使用作业详情携带的配置，否则回退到接口拉取（拿到 ETag 用于 If-Match）
+    // 查重配置：优先使用作业详情携带的配置，否则回退到接口拉取
     if (item.checkConfig) {
       applyCheckConfig(item.checkConfig)
-      checkConfigEtag.value = `"row-${item.rowVersion}"`
     } else {
       try {
         const result = await assignmentApi.checkConfig(item.id)
         applyCheckConfig(result.data)
-        checkConfigEtag.value = result.etag ?? `"row-${item.rowVersion}"`
       } catch {
         resetCheckConfig()
       }
@@ -174,12 +168,10 @@ async function fillForm(): Promise<void> {
     const dims = item.rubricDefinition?.dimensions ?? []
     if (dims.length) {
       applyRubric(dims)
-      rubricEtag.value = `"row-${item.rowVersion}"`
     } else {
       try {
         const result = await assignmentApi.rubric(item.id)
         applyRubric(result.data.dimensions ?? [])
-        rubricEtag.value = result.etag ?? `"row-${item.rowVersion}"`
       } catch {
         rubricRows.value = defaultRubricRows()
       }
@@ -318,10 +310,12 @@ async function save(): Promise<void> {
       }
       // 基础字段更新与查重配置/量规更新分离，避免相互覆盖
       const updated = await assignmentApi.update(item.id, payload, `"row-${item.rowVersion}"`)
+      // 三次写入共用同一个 assignment.row_version：第一次写入已用乐观锁校验过版本，
+      // 后续两次不能再带打开对话框时的陈旧 ETag，否则必然 412（数据已被其他用户修改）。
       if (form.checkEnabled) {
-        await assignmentApi.updateCheckConfig(item.id, buildCheckConfigPayload(), checkConfigEtag.value)
+        await assignmentApi.updateCheckConfig(item.id, buildCheckConfigPayload())
       }
-      await assignmentApi.updateRubric(item.id, buildRubricPayload(), rubricEtag.value)
+      await assignmentApi.updateRubric(item.id, buildRubricPayload())
       ElMessage.success('作业配置已更新')
       emit('saved', updated)
     } else {
