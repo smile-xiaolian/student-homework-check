@@ -32,7 +32,8 @@ public class NotificationController {
 
     @GetMapping("/unread-count")
     public Map<String, Long> unreadCount() {
-        return Map.of("count", notificationService.unreadCount(CurrentUser.require()));
+        // 前端按 { unreadCount } 读取未读数，字段名须保持一致
+        return Map.of("unreadCount", notificationService.unreadCount(CurrentUser.require()));
     }
 
     @PostMapping("/{id}/read")

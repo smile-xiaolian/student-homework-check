@@ -39,8 +39,14 @@ public class ReviewController {
     @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
     public PageResult<ReviewQueueItem> queue(@PathVariable UUID id,
                                              @RequestParam(required = false) Integer page,
-                                             @RequestParam(required = false) Integer size) {
-        return reviewService.reviewQueue(CurrentUser.require(), id, page, size);
+                                             @RequestParam(required = false) Integer size,
+                                             @RequestParam(required = false) String reviewStatus,
+                                             @RequestParam(required = false) String checkLevel,
+                                             @RequestParam(required = false) Boolean late,
+                                             @RequestParam(required = false) String keyword,
+                                             @RequestParam(required = false) String sort) {
+        return reviewService.reviewQueue(CurrentUser.require(), id, page, size,
+                reviewStatus, checkLevel, late, keyword, sort);
     }
 
     @GetMapping("/submissions/{id}/review")

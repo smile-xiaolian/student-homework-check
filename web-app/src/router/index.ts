@@ -28,6 +28,7 @@ const router = createRouter({
         { path: 'submissions/:id/report', name: 'check-report', component: () => import('@/views/checking/CheckReportView.vue'), meta: { title: '查重报告' } },
         { path: 'notifications', name: 'notifications', component: () => import('@/views/notification/NotificationView.vue'), meta: { title: '通知中心' } },
         { path: 'profile', name: 'profile', component: () => import('@/views/profile/ProfileView.vue'), meta: { title: '个人中心' } },
+        { path: 'admin/courses', name: 'admin-courses', component: () => import('@/views/admin/CourseAdminView.vue'), meta: { title: '课程与作业管理', roles: ['ADMIN'] } },
         { path: 'admin/users', name: 'admin-users', component: () => import('@/views/admin/UserAdminView.vue'), meta: { title: '用户管理', roles: ['ADMIN'] } },
         { path: 'admin/system', name: 'admin-system', component: () => import('@/views/admin/SystemAdminView.vue'), meta: { title: '系统管理', roles: ['ADMIN'] } },
       ],
@@ -48,6 +49,12 @@ router.beforeEach(async (to) => {
   }
   if (to.meta.roles?.length && !auth.hasRole(...to.meta.roles)) {
     return { name: 'dashboard' }
+  }
+  // 管理端不提供工作台、课程空间与通知中心页：管理员访问时重定向到对应管理页
+  if (auth.hasRole('ADMIN')) {
+    if (to.path === '/' || to.path === '/courses' || to.path === '/notifications') {
+      return { path: '/admin/courses' }
+    }
   }
   return true
 })

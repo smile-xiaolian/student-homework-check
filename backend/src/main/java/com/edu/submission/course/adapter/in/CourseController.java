@@ -108,7 +108,6 @@ public class CourseController {
     }
 
     @DeleteMapping("/{id}/members/{userId}")
-    @PreAuthorize("hasAnyRole('TEACHER','ADMIN')")
     public ResponseEntity<Void> removeMember(@PathVariable UUID id, @PathVariable UUID userId) {
         courseService.removeMember(CurrentUser.require(), id, userId);
         return ResponseEntity.noContent().build();

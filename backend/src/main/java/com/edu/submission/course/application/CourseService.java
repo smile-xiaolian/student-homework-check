@@ -388,29 +388,36 @@ public class CourseService {
     }
 
     /**
-     * 从花名册移除成员（软删除：status -> REMOVED）。
-     * 规则：仅课程管理者可操作；不能移除自己；INSTRUCTOR 仅创建者本人或 ADMIN 可移除；
-     * 目标必须是该课程当前 ACTIVE 成员。
+     * 从花名册移除成员或学生退课（软删除：status -> REMOVED）。
+     * 两种场景：
+     * 1) 本人退课：principal.id() == userId，仅限 STUDENT 课程成员本人操作，无需管理权限；
+     *    历史提交、成绩与申诉保留，课程归档与否均不影响退出。
+     * 2) 管理者移除他人：仅课程管理者可操作；不能移除自己；INSTRUCTOR 仅创建者本人或 ADMIN 可移除；
+     *    目标必须是该课程当前 ACTIVE 成员。
      */
     @Transactional
     public void removeMember(UserPrincipal principal, UUID courseId, UUID userId) {
         Course course = requireCourse(courseId);
-        requireManage(course, principal);
-        assertNotArchived(course);
-        if (principal.id().equals(userId)) {
-            throw ApiException.conflict("MEMBER_SELF_REMOVE_FORBIDDEN", "不能移除自己",
-                    "不能将当前账号从课程花名册中移除。");
-        }
+        boolean selfLeave = principal.id().equals(userId);
         CourseMember member = findMembership(courseId, userId);
         if (member == null || !"ACTIVE".equals(member.getStatus())) {
             throw ApiException.notFound("MEMBER_NOT_FOUND", "成员不存在",
                     "该用户不是本课程的当前成员。");
         }
-        if ("INSTRUCTOR".equals(member.getMemberRole())
-                && principal.role() != UserRole.ADMIN
-                && !course.getOwnerId().equals(principal.id())) {
-            throw ApiException.conflict("MEMBER_INSTRUCTOR_NOT_REMOVABLE", "不能移除授课教师",
-                    "只有课程创建者或管理员可以移除授课教师。");
+        if (selfLeave) {
+            if (!"STUDENT".equals(member.getMemberRole())) {
+                throw ApiException.conflict("MEMBER_LEAVE_FORBIDDEN", "无法退课",
+                        "仅学生可以主动退出课程。");
+            }
+        } else {
+            requireManage(course, principal);
+            assertNotArchived(course);
+            if ("INSTRUCTOR".equals(member.getMemberRole())
+                    && principal.role() != UserRole.ADMIN
+                    && !course.getOwnerId().equals(principal.id())) {
+                throw ApiException.conflict("MEMBER_INSTRUCTOR_NOT_REMOVABLE", "不能移除授课教师",
+                        "只有课程创建者或管理员可以移除授课教师。");
+            }
         }
         int updated = courseMemberMapper.update(null, new LambdaUpdateWrapper<CourseMember>()
                 .eq(CourseMember::getCourseId, courseId)
@@ -422,7 +429,8 @@ public class CourseService {
             throw ApiException.notFound("MEMBER_NOT_FOUND", "成员不存在",
                     "该用户不是本课程的当前成员。");
         }
-        auditService.recordUser(principal.id(), "roster.remove", "COURSE", courseId, "SUCCESS",
+        auditService.recordUser(principal.id(), selfLeave ? "roster.leave" : "roster.remove",
+                "COURSE", courseId, "SUCCESS",
                 Map.of("targetUserId", userId.toString(), "memberRole", member.getMemberRole()), null);
     }
 

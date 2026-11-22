@@ -34,6 +34,8 @@ const memberImporting = ref(false)
 const canManage = computed(() => Boolean(course.value && (auth.hasRole('ADMIN') || course.value.ownerId === auth.user?.id)))
 const canInstruct = computed(() => canManage.value || members.value.some((item) =>
   item.userId === auth.user?.id && item.status === 'ACTIVE' && item.memberRole === 'INSTRUCTOR'))
+const isActiveStudentMember = computed(() => Boolean(auth.user && members.value.some((item) =>
+  item.userId === auth.user?.id && item.status === 'ACTIVE' && item.memberRole === 'STUDENT')))
 const activeStudents = computed(() => members.value.filter((item) => item.memberRole === 'STUDENT' && item.status === 'ACTIVE'))
 const publishedCount = computed(() => assignments.value.filter((item) => item.status === 'PUBLISHED').length)
 const teacherNames = computed(() => members.value.filter((item) => item.memberRole !== 'STUDENT').map((item) => item.displayName).join('、'))
@@ -230,6 +232,22 @@ async function removeMember(item: CourseMember): Promise<void> {
   }
 }
 
+/** 学生主动退课：本人从花名册移除，历史提交与成绩仍保留。 */
+async function leaveCourse(): Promise<void> {
+  if (!auth.user) return
+  try {
+    await ElMessageBox.confirm(
+      `确定退出课程「${course.value?.name ?? ''}」吗？退出后将从花名册移除，历史提交与成绩仍保留。`,
+      '退课', { type: 'warning', confirmButtonText: '退课', confirmButtonClass: 'el-button--danger' },
+    )
+    await courseApi.removeMember(courseId, auth.user.id)
+    ElMessage.success('已退出课程')
+    router.replace('/courses')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  }
+}
+
 function goLibraries(): void {
   router.push(`/courses/${courseId}/libraries`)
 }
@@ -281,7 +299,7 @@ onMounted(load)
     <el-skeleton :loading="loading" animated :rows="10">
       <template #default>
         <template v-if="course">
-          <div class="breadcrumb"><button @click="router.push('/courses')">课程空间</button><span>/</span>{{ course.courseCode }}</div>
+          <div class="breadcrumb"><button @click="router.push(auth.hasRole('ADMIN') ? '/admin/courses' : '/courses')">{{ auth.hasRole('ADMIN') ? '课程与作业管理' : '课程空间' }}</button><span>/</span>{{ course.courseCode }}</div>
           <section class="course-hero">
             <div class="hero-main">
               <div class="tag-row"><el-tag effect="dark" type="success" size="small">{{ course.status === 'ACTIVE' ? '进行中' : '已归档' }}</el-tag><span>{{ course.semester }}</span></div>
@@ -330,11 +348,11 @@ onMounted(load)
                 </div>
                 <div v-else class="empty-line">还没有作业。{{ canInstruct ? '创建第一份作业吧。' : '' }}</div>
               </el-tab-pane>
-              <el-tab-pane :label="`花名册 (${members.length})`" name="members">
+              <el-tab-pane v-if="!auth.hasRole('STUDENT')" :label="`花名册 (${members.length})`" name="members">
                 <div class="tab-toolbar">
                   <p>课程教师、助教与学生名单。</p>
                   <div class="tab-actions">
-                    <el-upload ref="memberImportRef" :show-file-list="false" :auto-upload="false" :limit="1" accept=".xlsx" :on-change="onMemberImportChange">
+                    <el-upload v-if="canInstruct" ref="memberImportRef" :show-file-list="false" :auto-upload="false" :limit="1" accept=".xlsx" :on-change="onMemberImportChange">
                       <el-button :loading="memberImporting">批量导入</el-button>
                     </el-upload>
                     <el-button v-if="canInstruct" @click="memberVisible = true">＋ 添加成员</el-button>
@@ -345,7 +363,7 @@ onMounted(load)
                   <el-table-column prop="displayName" label="姓名" min-width="140" />
                   <el-table-column label="课程角色" width="130"><template #default="{ row }"><el-tag size="small" effect="plain" :type="row.memberRole === 'INSTRUCTOR' ? 'warning' : row.memberRole === 'ASSISTANT' ? 'success' : 'info'">{{ row.memberRole === 'INSTRUCTOR' ? '授课教师' : row.memberRole === 'ASSISTANT' ? '助教' : '学生' }}</el-tag></template></el-table-column>
                   <el-table-column label="加入时间" width="170"><template #default="{ row }">{{ format(row.joinedAt) }}</template></el-table-column>
-                  <el-table-column label="操作" width="100" fixed="right">
+                  <el-table-column label="操作" width="110" fixed="right">
                     <template #default="{ row }">
                       <el-button v-if="canInstruct && ['STUDENT', 'ASSISTANT'].includes(row.memberRole) && row.userId !== auth.user?.id"
                                  link type="danger" @click="removeMember(row)">移除</el-button>
@@ -360,6 +378,7 @@ onMounted(load)
                   <div><b>创建时间</b><span>{{ format(course.createdAt) }}</span></div>
                   <div><b>最近更新</b><span>{{ format(course.updatedAt) }}</span></div>
                   <div><b>评审结果学生可见</b><span>课程层面未配置全局开关，请在作业详情页为每份作业单独配置。</span></div>
+                  <div v-if="isActiveStudentMember" class="danger-row"><span><b>退课</b><small>退出课程后将从花名册移除，历史提交与成绩仍保留。</small></span><el-button type="danger" plain @click="leaveCourse">退课</el-button></div>
                   <div v-if="canManage && course.status === 'ACTIVE'" class="danger-row"><span><b>归档课程</b><small>归档后不能再修改或提交，请谨慎操作。</small></span><el-button type="danger" plain @click="archiveCourse">归档课程</el-button></div>
                 </div>
               </el-tab-pane>

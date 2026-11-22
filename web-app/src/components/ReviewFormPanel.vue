@@ -26,6 +26,8 @@ const reviewForm = reactive({ rawScore: 0, checkVerdict: 'ORIGINAL', comment: ''
 const dimensionScores = reactive<Record<string, number>>({})
 const levelSelection = reactive<Record<string, string>>({})
 const annotations = ref<Array<{ id: string; text: string; quote: string }>>([])
+/** 评分方式二选一：DIMENSION 按维度评分（自动合计总分），RAW 直接输入原始得分 */
+const scoreMode = ref<'DIMENSION' | 'RAW'>('DIMENSION')
 
 /** 反馈附件（单文件，先上传得到 fileId，再随保存/更正提交） */
 const feedbackFileId = ref<string | null>(null)
@@ -63,6 +65,8 @@ function fillFromReview(data: Review): void {
   reviewForm.comment = data.comment ?? ''
   feedbackFileId.value = data.feedbackFileId ?? null
   feedbackFileName.value = data.feedbackFileName ?? null
+  // 已保存过维度评分则以维度模式回显，否则按原始得分模式
+  scoreMode.value = dimensions.value.length && (data.dimensionScores?.length ?? 0) > 0 ? 'DIMENSION' : 'RAW'
   const scoreMap = new Map<string, number>()
   for (const item of data.dimensionScores ?? []) scoreMap.set(item.criterionId, item.score)
   for (const dim of dimensions.value) {
@@ -90,6 +94,7 @@ async function loadReview(): Promise<void> {
     reviewForm.comment = ''
     feedbackFileId.value = null
     feedbackFileName.value = null
+    scoreMode.value = dimensions.value.length ? 'DIMENSION' : 'RAW'
     for (const dim of dimensions.value) dimensionScores[dim.key] = 0
     annotations.value = []
   } finally {
@@ -112,12 +117,15 @@ function removeAnnotation(index: number): void {
 }
 
 function buildPayload(): Record<string, unknown> {
+  const byDimension = dimensions.value.length > 0 && scoreMode.value === 'DIMENSION'
   return {
-    rawScore: Number(reviewForm.rawScore),
-    dimensionScores: dimensions.value.map((dim) => ({
-      criterionId: dim.key,
-      score: Number(dimensionScores[dim.key] ?? 0),
-    })),
+    rawScore: byDimension ? Number(dimensionTotal.value) : Number(reviewForm.rawScore),
+    dimensionScores: byDimension
+      ? dimensions.value.map((dim) => ({
+        criterionId: dim.key,
+        score: Number(dimensionScores[dim.key] ?? 0),
+      }))
+      : [],
     annotations: annotations.value.map((item) => ({ id: item.id, text: item.text, quote: item.quote })),
     checkVerdict: reviewForm.checkVerdict,
     comment: reviewForm.comment,
@@ -129,9 +137,6 @@ function buildPayload(): Record<string, unknown> {
 async function save(submitAfter = false): Promise<void> {
   saving.value = true
   try {
-    if (dimensions.value.length && Math.abs(dimensionTotal.value - Number(reviewForm.rawScore)) > 0.001) {
-      ElMessage.warning('维度合计与原始得分不一致，已按维度分数记录，请核对后提交。')
-    }
     const saved = await reviewApi.save(props.submissionId, buildPayload())
     rowVersion.value = saved.rowVersion
     review.value = saved
@@ -244,30 +249,44 @@ onMounted(loadReview)
 <template>
   <div class="review-form-panel" v-loading="loading">
     <template v-if="dimensions.length">
-      <div class="rubric-summary">
-        <span>维度合计</span><b>{{ dimensionTotal.toFixed(1) }}</b>
-        <span class="divider">/</span><span>量规总分</span><b>{{ rubricTotal.toFixed(1) }}</b>
+      <div class="score-mode">
+        <span>评分方式</span>
+        <el-radio-group v-model="scoreMode">
+          <el-radio value="DIMENSION">按维度评分</el-radio>
+          <el-radio value="RAW">直接输入原始得分</el-radio>
+        </el-radio-group>
       </div>
-      <div class="dimension-list">
-        <div v-for="dim in dimensions" :key="dim.key" class="dim-row">
-          <div class="dim-info"><span>{{ dim.name }}</span><small>{{ dim.description }}</small></div>
-          <div class="dim-input">
-            <el-select v-if="dim.levels?.length" v-model="levelSelection[dim.key]" placeholder="选择等级"
-                       style="width: 100%" @change="onLevelChange(dim.key)">
-              <el-option v-for="level in dim.levels" :key="level.label" :label="`${level.label}（${level.score} 分）`" :value="level.label" />
-            </el-select>
-            <el-input-number v-else v-model="dimensionScores[dim.key]" :min="0" :max="dim.maxScore"
-                             :step="0.5" :precision="1" controls-position="right" style="width: 100%" />
-          </div>
-          <span class="dim-max">/ {{ dim.maxScore }}</span>
+      <template v-if="scoreMode === 'DIMENSION'">
+        <div class="rubric-summary">
+          <span>维度合计</span><b>{{ dimensionTotal.toFixed(1) }}</b>
+          <span class="divider">/</span><span>量规总分</span><b>{{ rubricTotal.toFixed(1) }}</b>
         </div>
-      </div>
+        <div class="dimension-list">
+          <div v-for="dim in dimensions" :key="dim.key" class="dim-row">
+            <div class="dim-info"><span>{{ dim.name }}</span><small>{{ dim.description }}</small></div>
+            <div class="dim-input">
+              <el-select v-if="dim.levels?.length" v-model="levelSelection[dim.key]" placeholder="选择等级"
+                         style="width: 100%" @change="onLevelChange(dim.key)">
+                <el-option v-for="level in dim.levels" :key="level.label" :label="`${level.label}（${level.score} 分）`" :value="level.label" />
+              </el-select>
+              <el-input-number v-else v-model="dimensionScores[dim.key]" :min="0" :max="dim.maxScore"
+                               :step="0.5" :precision="1" controls-position="right" style="width: 100%" />
+            </div>
+            <span class="dim-max">/ {{ dim.maxScore }}</span>
+          </div>
+        </div>
+      </template>
     </template>
     <p v-else class="muted small rubric-empty">该作业未配置评分量规，仅记录原始得分。</p>
 
     <el-form label-position="top" class="review-form">
-      <el-form-item label="原始得分">
-        <el-input-number v-model="reviewForm.rawScore" :min="0" :max="rawMax" :precision="1" style="width: 100%" />
+      <el-form-item :label="dimensions.length && scoreMode === 'DIMENSION' ? '原始得分（按维度自动合计）' : '原始得分'">
+        <el-input-number v-if="scoreMode === 'RAW' || !dimensions.length" v-model="reviewForm.rawScore"
+                         :min="0" :max="rawMax" :precision="1" style="width: 100%" />
+        <template v-else>
+          <el-input :model-value="dimensionTotal.toFixed(1)" disabled />
+          <p class="mode-hint">已按维度评分自动计算总分，如需手工给分请切换为「直接输入原始得分」。</p>
+        </template>
       </el-form-item>
       <el-form-item label="查重结论">
         <el-select v-model="reviewForm.checkVerdict" style="width: 100%">
@@ -359,6 +378,9 @@ onMounted(loadReview)
 .dim-info small { display: block; color: #97a1ac; font-size: 10px; margin-top: 2px; line-height: 1.4; }
 .dim-max { color: #97a1ac; font-size: 11px; white-space: nowrap; }
 .rubric-empty { margin: 0 0 16px; }
+.score-mode { display: flex; align-items: center; gap: 12px; padding: 10px 13px; background: #f6f9f9; border: 1px solid #e6ecec; border-radius: 9px; margin-bottom: 14px; font-size: 12px; }
+.score-mode > span { color: #7d8996; white-space: nowrap; }
+.mode-hint { margin: 6px 0 0; color: #8c97a3; font-size: 11px; line-height: 1.6; }
 .review-form :deep(.el-form-item) { margin-bottom: 14px; }
 .annotations-block { border-top: 1px solid #edf1f2; padding-top: 14px; margin-top: 4px; }
 .annotations-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }

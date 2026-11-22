@@ -93,11 +93,54 @@ public class ReviewService {
 
     @Transactional(readOnly = true)
     public PageResult<ReviewQueueItem> reviewQueue(UserPrincipal principal, UUID assignmentId,
-                                                   Integer page, Integer size) {
+                                                   Integer page, Integer size,
+                                                   String reviewStatus, String checkLevel, Boolean late,
+                                                   String keyword, String sort) {
         UUID courseId = assignmentCourse(assignmentId);
         Course course = courseService.requireCourse(courseId);
         courseService.requireManage(course, principal);
         PageQuery query = PageQuery.of(page, size);
+
+        // 动态筛选：按评审状态 / 查重等级 / 是否迟交 / 姓名或学号 过滤
+        StringBuilder where = new StringBuilder(
+                " WHERE s.assignment_id = ? AND s.is_effective = true " +
+                        "AND s.status NOT IN ('WITHDRAWN','PENDING_SCAN')");
+        List<Object> args = new java.util.ArrayList<>();
+        args.add(assignmentId);
+        if (reviewStatus != null && !reviewStatus.isBlank()) {
+            where.append(" AND coalesce(g.status, 'NOT_STARTED') = ?");
+            args.add(reviewStatus);
+        }
+        if (checkLevel != null && !checkLevel.isBlank()) {
+            where.append(" AND r.level = ?");
+            args.add(checkLevel);
+        }
+        if (late != null) {
+            where.append(" AND s.is_late = ?");
+            args.add(late);
+        }
+        if (keyword != null && !keyword.isBlank()) {
+            where.append(" AND (u.display_name ILIKE ? OR u.user_no ILIKE ?)");
+            String like = "%" + keyword.trim() + "%";
+            args.add(like);
+            args.add(like);
+        }
+
+        // 排序：按前端选中的排序项；未指定时保持严重级置顶的默认顺序
+        String orderBy = switch (sort == null ? "" : sort) {
+            case "checkScore" -> "ORDER BY r.overall_score DESC NULLS LAST, s.submitted_at ASC";
+            case "submitterId" -> "ORDER BY u.user_no ASC, s.submitted_at ASC";
+            case "submittedAt" -> "ORDER BY s.submitted_at ASC";
+            case "reviewStatus" -> "ORDER BY CASE coalesce(g.status, 'NOT_STARTED') " +
+                    "WHEN 'NOT_STARTED' THEN 0 WHEN 'DRAFT' THEN 1 WHEN 'SUBMITTED' THEN 2 " +
+                    "WHEN 'PUBLISHED' THEN 3 ELSE 4 END, s.submitted_at ASC";
+            default -> "ORDER BY CASE WHEN r.level = 'SEVERE' THEN 0 ELSE 1 END, " +
+                    "s.is_late DESC, s.submitted_at ASC";
+        };
+
+        List<Object> pageArgs = new java.util.ArrayList<>(args);
+        pageArgs.add(query.size());
+        pageArgs.add(query.offset());
         List<ReviewQueueItem> items = jdbcTemplate.query(
                 "SELECT s.id AS submission_id, s.submitter_id, u.display_name, s.version_no, s.submitted_at, " +
                         "s.is_late, r.overall_score AS check_score, r.level AS check_level, " +
@@ -105,22 +148,20 @@ public class ReviewService {
                         "FROM app.submission s JOIN app.user_account u ON u.id = s.submitter_id " +
                         "LEFT JOIN app.check_report r ON r.submission_id = s.id AND r.is_current = true " +
                         "LEFT JOIN app.grade g ON g.submission_id = s.id " +
-                        "WHERE s.assignment_id = ? AND s.is_effective = true " +
-                        "AND s.status NOT IN ('WITHDRAWN','PENDING_SCAN') " +
-                        // FR-K-09 严重级置顶：r 为 LEFT JOIN check_report，level 可能为 NULL（落入 ELSE 分支）
-                        "ORDER BY CASE WHEN r.level = 'SEVERE' THEN 0 ELSE 1 END, " +
-                        "s.is_late DESC, s.submitted_at ASC LIMIT ? OFFSET ?",
+                        where + " " + orderBy + " LIMIT ? OFFSET ?",
                 (rs, index) -> new ReviewQueueItem(
                         rs.getObject("submission_id", UUID.class), rs.getObject("submitter_id", UUID.class),
                         rs.getString("display_name"), rs.getInt("version_no"),
                         rs.getObject("submitted_at", OffsetDateTime.class), rs.getBoolean("is_late"),
                         rs.getBigDecimal("check_score"), rs.getString("check_level"),
                         rs.getString("review_status"), rs.getString("grade_status")),
-                assignmentId, query.size(), query.offset());
+                pageArgs.toArray());
         Long total = jdbcTemplate.queryForObject(
-                "SELECT count(*) FROM app.submission WHERE assignment_id = ? AND is_effective = true " +
-                        "AND status NOT IN ('WITHDRAWN','PENDING_SCAN')",
-                Long.class, assignmentId);
+                "SELECT count(distinct s.id) FROM app.submission s " +
+                        "JOIN app.user_account u ON u.id = s.submitter_id " +
+                        "LEFT JOIN app.check_report r ON r.submission_id = s.id AND r.is_current = true " +
+                        "LEFT JOIN app.grade g ON g.submission_id = s.id " + where,
+                Long.class, args.toArray());
         return new PageResult<>(items, Pagination.of(query.page(), query.size(),
                 total == null ? 0 : total));
     }
@@ -319,12 +360,12 @@ public class ReviewService {
                         submissionId, assignmentId);
             }
         }
-        // 成绩发布通知：仅通知本次新发布的提交，向提交人推送
+        // 成绩发布通知：仅通知本次新发布的提交，向提交人推送；目标指向作业，学生可跳转查看成绩
         for (PublishTarget target : targets) {
             notificationService.notifyUsers(List.of(target.submitterId()), "GRADE_PUBLISHED",
                     "成绩已发布",
                     "作业《" + target.title() + "》成绩已发布，最终得分：" + target.finalScore() + " 分。",
-                    "SUBMISSION", target.submissionId());
+                    "ASSIGNMENT", assignmentId);
         }
         auditService.recordUser(principal.id(), "grade.publish", "ASSIGNMENT", assignmentId,
                 "SUCCESS", Map.of("publishedCount", count, "notifiedCount", targets.size()), null);
@@ -395,7 +436,7 @@ public class ReviewService {
             notificationService.notifyUsers(List.of(submission.submitterId()), "GRADE_PUBLISHED",
                     "成绩已更新",
                     "作业《" + title + "》成绩已更新，最终得分：" + finalScore + " 分。",
-                    "SUBMISSION", submissionId);
+                    "ASSIGNMENT", submission.assignmentId());
         }
         auditService.recordUser(principal.id(), "grade.modify", "SUBMISSION", submissionId, "SUCCESS",
                 Map.of("reason", reason,

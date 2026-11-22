@@ -78,9 +78,9 @@ onMounted(load)
         <h1>{{ greeting }}，{{ auth.user?.displayName }}</h1>
         <p>今天也从一件清晰的小事开始。课程动态与待办已经为你汇总。</p>
       </div>
-      <button class="hero-action" type="button" @click="router.push('/courses')">
+      <button class="hero-action" type="button" @click="router.push(auth.hasRole('ADMIN') ? '/admin/courses' : '/courses')">
         <small>{{ auth.displayRole }}工作区</small>
-        <strong>进入课程空间</strong><span>→</span>
+        <strong>{{ auth.hasRole('ADMIN') ? '课程与作业管理' : '进入课程空间' }}</strong><span>→</span>
       </button>
     </section>
 
@@ -96,11 +96,11 @@ onMounted(load)
           </div>
         </div>
 
-        <div class="split-grid dash-grid">
+        <div class="split-grid dash-grid" :class="{ single: auth.hasRole('ADMIN') }">
           <section class="surface surface-pad">
             <div class="section-head">
               <div><h2>近期作业</h2><p>按截止时间排序</p></div>
-              <button type="button" @click="router.push('/courses')">全部课程 →</button>
+              <button type="button" @click="router.push(auth.hasRole('ADMIN') ? '/admin/courses' : '/courses')">全部课程 →</button>
             </div>
             <div v-if="upcoming.length" class="assignment-list">
               <button v-for="item in upcoming" :key="item.id" type="button" class="assignment-row"
@@ -119,7 +119,7 @@ onMounted(load)
             <div v-else class="empty-line">暂无进行中的作业</div>
           </section>
 
-          <aside class="surface surface-pad">
+          <aside v-if="!auth.hasRole('ADMIN')" class="surface surface-pad">
             <div class="section-head"><div><h2>最新通知</h2><p>站内消息与提醒</p></div>
               <button type="button" @click="router.push('/notifications')">查看全部</button>
             </div>
@@ -137,9 +137,9 @@ onMounted(load)
         <section class="surface surface-pad quick-section">
           <div class="section-head"><div><h2>快捷入口</h2><p>第一轮迭代核心能力</p></div></div>
           <div class="quick-grid">
-            <button type="button" @click="router.push('/courses')"><b>课程空间</b><span>查看花名册、邀请码与课程作业</span></button>
-            <button type="button" @click="router.push('/notifications')"><b>通知中心</b><span>查收作业发布、查重完成与系统提醒</span></button>
-            <button v-if="auth.canReview" type="button" @click="router.push('/courses')"><b>评审入口</b><span>从作业详情进入评审与成绩工作台</span></button>
+            <button type="button" @click="router.push(auth.hasRole('ADMIN') ? '/admin/courses' : '/courses')"><b>{{ auth.hasRole('ADMIN') ? '课程与作业管理' : '课程空间' }}</b><span>查看课程与作业，维护课程状态</span></button>
+            <button v-if="!auth.hasRole('ADMIN')" type="button" @click="router.push('/notifications')"><b>通知中心</b><span>查收作业发布、查重完成与系统提醒</span></button>
+            <button v-if="auth.canReview && !auth.hasRole('ADMIN')" type="button" @click="router.push('/courses')"><b>评审入口</b><span>从作业详情进入评审与成绩工作台</span></button>
             <button v-if="auth.hasRole('ADMIN')" type="button" @click="router.push('/admin/system')"><b>系统管理</b><span>参数、监控与审计日志</span></button>
           </div>
         </section>
@@ -172,6 +172,7 @@ onMounted(load)
 .stat-card.highlight > span, .stat-card.highlight small { color: #a7c2be; }
 .stat-card.highlight strong { font-size: 26px; color: #f4c95d; }
 .dash-grid { margin-bottom: 20px; }
+.dash-grid.single { grid-template-columns: 1fr; }
 .section-head { display: flex; justify-content: space-between; align-items: start; gap: 15px; margin-bottom: 17px; }
 .section-head h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: -.02em; }
 .section-head p { color: #8a94a2; font-size: 12px; margin: 0; }

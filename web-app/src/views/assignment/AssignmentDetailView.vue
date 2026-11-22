@@ -366,7 +366,7 @@ onMounted(load)
     <el-skeleton :loading="loading" animated :rows="12">
       <template #default>
         <template v-if="assignment && course">
-          <div class="breadcrumb"><button @click="router.push('/courses')">课程空间</button><span>/</span><button @click="router.push(`/courses/${course.id}`)">{{ course.name }}</button><span>/</span>作业详情</div>
+          <div class="breadcrumb"><button @click="router.push(auth.hasRole('ADMIN') ? '/admin/courses' : '/courses')">{{ auth.hasRole('ADMIN') ? '课程与作业管理' : '课程空间' }}</button><span>/</span><button @click="router.push(`/courses/${course.id}`)">{{ course.name }}</button><span>/</span>作业详情</div>
           <div class="page-head assignment-head">
             <div>
               <div class="title-tags"><el-tag size="small" effect="plain" :type="assignment.status === 'PUBLISHED' ? 'success' : 'info'">{{ assignment.status === 'PUBLISHED' ? '进行中' : '草稿' }}</el-tag><span v-if="assignment.checkEnabled" class="check-tag">自动查重</span><span class="weight">权重 {{ assignment.weight }}%</span></div>

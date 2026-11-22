@@ -6,7 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useNotificationStore } from '@/stores/notification'
 import type { Role } from '@/types/api'
 
-interface NavItem { label: string; path: string; icon: string; roles?: Role[] }
+interface NavItem { label: string; path: string; icon: string; roles?: Role[]; excludeRoles?: Role[] }
 
 const route = useRoute()
 const router = useRouter()
@@ -15,19 +15,21 @@ const notifications = useNotificationStore()
 const mobileOpen = ref(false)
 
 const navItems: NavItem[] = [
-  { label: '工作台', path: '/', icon: '◫' },
-  { label: '课程空间', path: '/courses', icon: '▤' },
-  { label: '通知中心', path: '/notifications', icon: '◉' },
-  { label: '个人中心', path: '/profile', icon: '○' },
+  { label: '工作台', path: '/', icon: '◫', excludeRoles: ['ADMIN'] },
+  { label: '课程空间', path: '/courses', icon: '▤', excludeRoles: ['ADMIN'] },
+  { label: '通知中心', path: '/notifications', icon: '◉', excludeRoles: ['ADMIN'] },
+  { label: '课程与作业管理', path: '/admin/courses', icon: '▤', roles: ['ADMIN'] },
   { label: '用户管理', path: '/admin/users', icon: '♙', roles: ['ADMIN'] },
   { label: '系统管理', path: '/admin/system', icon: '⚙', roles: ['ADMIN'] },
+  { label: '个人中心', path: '/profile', icon: '○' },
 ]
 
 const visibleNav = computed(() => navItems.filter((item) =>
-  !item.roles || auth.hasRole(...item.roles)))
+  (!item.roles || auth.hasRole(...item.roles)) && (!item.excludeRoles || !auth.hasRole(...item.excludeRoles))))
 
 const activePath = computed(() => {
   if (route.path.startsWith('/courses')) return '/courses'
+  if (route.path.startsWith('/admin/courses')) return '/admin/courses'
   if (route.path.startsWith('/admin/users')) return '/admin/users'
   if (route.path.startsWith('/admin/system')) return '/admin/system'
   return route.path
